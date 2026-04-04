@@ -1,15 +1,16 @@
 import json
 import os
 import re
-import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, date, time, timedelta
+from typing import Any
 from zoneinfo import ZoneInfo
 
+import psycopg
+from psycopg.rows import dict_row
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
-from apscheduler.schedulers.background import BackgroundScheduler
 
 from linebot.v3 import WebhookParser
 from linebot.v3.exceptions import InvalidSignatureError
@@ -37,19 +38,23 @@ TZ = ZoneInfo(os.getenv("TZ", "Asia/Tokyo"))
 CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
 CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET", "")
 BOT_PASSWORD = os.getenv("BOT_PASSWORD", "")
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+CRON_SECRET = os.getenv("CRON_SECRET", "")
 
 if not CHANNEL_ACCESS_TOKEN or not CHANNEL_SECRET or not BOT_PASSWORD:
     raise RuntimeError(
         "環境変数 LINE_CHANNEL_ACCESS_TOKEN / LINE_CHANNEL_SECRET / BOT_PASSWORD を設定してください。"
     )
 
+if not DATABASE_URL:
+    raise RuntimeError("環境変数 DATABASE_URL を設定してください。")
+
+if not CRON_SECRET:
+    raise RuntimeError("環境変数 CRON_SECRET を設定してください。")
+
 app = FastAPI()
 parser = WebhookParser(CHANNEL_SECRET)
 configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
-scheduler = BackgroundScheduler(timezone=str(TZ))
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "bot.db")
 
 STATE_NONE = "none"
 STATE_WAITING_PASSWORD = "waiting_password"
@@ -71,10 +76,10 @@ WEEKDAY_MAP = {
 
 JP_WEEK_FULL = ["月曜日", "火曜日", "水曜日", "木曜日", "金曜日", "土曜日", "日曜日"]
 
+
 @contextmanager
 def get_conn():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn = psycopg.connect(DATABASE_URL, row_factory=dict_row)
     try:
         yield conn
         conn.commit()
@@ -101,28 +106,30 @@ def init_db():
 
         cur.execute("""
         CREATE TABLE IF NOT EXISTS reminders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id BIGSERIAL PRIMARY KEY,
             user_id TEXT NOT NULL,
             content TEXT NOT NULL,
-            kind TEXT NOT NULL,                  -- single / weekly
-            scheduled_at TEXT,                   -- 単発予定: ISO datetime
-            weekday INTEGER,                     -- 繰り返し予定: 0=月 ... 6=日
-            time_hhmm TEXT NOT NULL,             -- HH:MM
-            last_day_notice_date TEXT,           -- YYYY-MM-DD
-            last_1h_notice_date TEXT,            -- YYYY-MM-DD
-            last_10m_notice_date TEXT,           -- YYYY-MM-DD
+            kind TEXT NOT NULL,
+            scheduled_at TEXT,
+            weekday INTEGER,
+            time_hhmm TEXT NOT NULL,
+            last_day_notice_date TEXT,
+            last_1h_notice_date TEXT,
+            last_10m_notice_date TEXT,
+            last_exact_notice_date TEXT,
             created_at TEXT NOT NULL
         )
         """)
 
         cur.execute("""
         CREATE TABLE IF NOT EXISTS wants (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id BIGSERIAL PRIMARY KEY,
             user_id TEXT NOT NULL,
             content TEXT NOT NULL,
             created_at TEXT NOT NULL
         )
         """)
+
         cur.execute("""
         CREATE TABLE IF NOT EXISTS authorized_users (
             user_id TEXT PRIMARY KEY,
@@ -139,16 +146,21 @@ def init_db():
         )
         """)
 
+        cur.execute("""
+        ALTER TABLE reminders
+        ADD COLUMN IF NOT EXISTS last_exact_notice_date TEXT
+        """)
 
-def get_state(user_id: str) -> dict:
+
+def get_state(user_id: str) -> dict[str, Any]:
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT user_id, state, temp_content, updated_at FROM user_states WHERE user_id = ?",
+            "SELECT user_id, state, temp_content, updated_at FROM user_states WHERE user_id = %s",
             (user_id,)
         ).fetchone()
 
         if row:
-            return dict(row)
+            return row
 
         current = {
             "user_id": user_id,
@@ -157,7 +169,14 @@ def get_state(user_id: str) -> dict:
             "updated_at": now_jst().isoformat()
         }
         conn.execute(
-            "INSERT OR REPLACE INTO user_states (user_id, state, temp_content, updated_at) VALUES (?, ?, ?, ?)",
+            """
+            INSERT INTO user_states (user_id, state, temp_content, updated_at)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT(user_id) DO UPDATE SET
+                state = EXCLUDED.state,
+                temp_content = EXCLUDED.temp_content,
+                updated_at = EXCLUDED.updated_at
+            """,
             (user_id, current["state"], current["temp_content"], current["updated_at"])
         )
         return current
@@ -168,11 +187,11 @@ def set_state(user_id: str, state: str, temp_content: str | None = None):
         conn.execute(
             """
             INSERT INTO user_states (user_id, state, temp_content, updated_at)
-            VALUES (?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s)
             ON CONFLICT(user_id) DO UPDATE SET
-                state = excluded.state,
-                temp_content = excluded.temp_content,
-                updated_at = excluded.updated_at
+                state = EXCLUDED.state,
+                temp_content = EXCLUDED.temp_content,
+                updated_at = EXCLUDED.updated_at
             """,
             (user_id, state, temp_content, now_jst().isoformat())
         )
@@ -181,10 +200,11 @@ def set_state(user_id: str, state: str, temp_content: str | None = None):
 def reset_state(user_id: str):
     set_state(user_id, STATE_NONE, None)
 
+
 def is_authorized_user(user_id: str) -> bool:
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT user_id FROM authorized_users WHERE user_id = ?",
+            "SELECT user_id FROM authorized_users WHERE user_id = %s",
             (user_id,)
         ).fetchone()
         return row is not None
@@ -194,25 +214,28 @@ def authorize_user(user_id: str):
     with get_conn() as conn:
         conn.execute(
             """
-            INSERT OR REPLACE INTO authorized_users (user_id, authorized_at)
-            VALUES (?, ?)
+            INSERT INTO authorized_users (user_id, authorized_at)
+            VALUES (%s, %s)
+            ON CONFLICT(user_id) DO UPDATE SET
+                authorized_at = EXCLUDED.authorized_at
             """,
             (user_id, now_jst().isoformat())
         )
 
-def get_auth_attempt(user_id: str) -> dict:
+
+def get_auth_attempt(user_id: str) -> dict[str, Any]:
     with get_conn() as conn:
         row = conn.execute(
             """
             SELECT user_id, failed_count, locked_until, updated_at
             FROM auth_attempts
-            WHERE user_id = ?
+            WHERE user_id = %s
             """,
             (user_id,)
         ).fetchone()
 
         if row:
-            return dict(row)
+            return row
 
         current = {
             "user_id": user_id,
@@ -223,7 +246,7 @@ def get_auth_attempt(user_id: str) -> dict:
         conn.execute(
             """
             INSERT INTO auth_attempts (user_id, failed_count, locked_until, updated_at)
-            VALUES (?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s)
             """,
             (user_id, 0, None, now_jst().isoformat())
         )
@@ -235,11 +258,11 @@ def reset_auth_attempt(user_id: str):
         conn.execute(
             """
             INSERT INTO auth_attempts (user_id, failed_count, locked_until, updated_at)
-            VALUES (?, 0, NULL, ?)
+            VALUES (%s, 0, NULL, %s)
             ON CONFLICT(user_id) DO UPDATE SET
                 failed_count = 0,
                 locked_until = NULL,
-                updated_at = excluded.updated_at
+                updated_at = EXCLUDED.updated_at
             """,
             (user_id, now_jst().isoformat())
         )
@@ -259,11 +282,11 @@ def register_auth_failure(user_id: str, lock_minutes: int = 10, max_failures: in
         conn.execute(
             """
             INSERT INTO auth_attempts (user_id, failed_count, locked_until, updated_at)
-            VALUES (?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s)
             ON CONFLICT(user_id) DO UPDATE SET
-                failed_count = excluded.failed_count,
-                locked_until = excluded.locked_until,
-                updated_at = excluded.updated_at
+                failed_count = EXCLUDED.failed_count,
+                locked_until = EXCLUDED.locked_until,
+                updated_at = EXCLUDED.updated_at
             """,
             (user_id, failed_count, locked_until, now_jst().isoformat())
         )
@@ -309,8 +332,8 @@ def send_push(user_id: str, messages: list):
 def text_message(text: str) -> TextMessage:
     return TextMessage(text=text)
 
+
 def safe_date_str(y: int, m: int, d: int) -> str:
-    # ゼロ幅スペースでリンク防止
     zw = "\u200b"
     return f"{y}-{zw}{m:02d}-{zw}{d:02d}"
 
@@ -440,7 +463,6 @@ def normalize_digits(text: str) -> str:
 def parse_time_hhmm(s: str) -> str | None:
     s = normalize_digits(s)
 
-    # 10:30
     m = re.search(r"(\d{1,2}):(\d{2})", s)
     if m:
         hh = int(m.group(1))
@@ -448,7 +470,6 @@ def parse_time_hhmm(s: str) -> str | None:
         if 0 <= hh <= 23 and 0 <= mm <= 59:
             return f"{hh:02d}:{mm:02d}"
 
-    # 10時 / 10時30分
     m = re.search(r"(\d{1,2})時(?:(\d{1,2})分)?", s)
     if m:
         hh = int(m.group(1))
@@ -461,6 +482,7 @@ def parse_time_hhmm(s: str) -> str | None:
 
 def require_time_hhmm(s: str) -> str | None:
     return parse_time_hhmm(s)
+
 
 def parse_relative_datetime(s: str) -> datetime | None:
     s = normalize_digits(s)
@@ -493,21 +515,11 @@ def parse_time_only_datetime(s: str) -> tuple[datetime, str] | None:
 
     return candidate, hhmm
 
-def parse_datetime_input(text: str) -> dict | None:
-    """
-    戻り値:
-    単発:
-      {"kind":"single", "scheduled_at": datetime, "time_hhmm":"HH:MM"}
-    毎週:
-      {"kind":"weekly", "weekday": 0-6, "time_hhmm":"HH:MM"}
-    エラー:
-      {"error":"time_required"}
-    """
-    s = text.strip()
+
+def parse_datetime_input(text: str) -> dict[str, Any] | None:
     s = normalize_digits(text.strip())
     now = now_jst()
 
-    # 0) 3分後 / 2時間後
     relative_dt = parse_relative_datetime(s)
     if relative_dt:
         return {
@@ -516,7 +528,6 @@ def parse_datetime_input(text: str) -> dict | None:
             "time_hhmm": relative_dt.strftime("%H:%M")
         }
 
-    # 0-2) 10時 / 10時30分
     time_only = parse_time_only_datetime(s)
     if time_only and not any(word in s for word in ["今日", "明日", "明後日", "来週", "月", "火", "水", "木", "金", "土", "日", "/"]):
         dt, hhmm = time_only
@@ -526,10 +537,9 @@ def parse_datetime_input(text: str) -> dict | None:
             "time_hhmm": hhmm
         }
 
-    def need_time() -> dict:
+    def need_time() -> dict[str, str]:
         return {"error": "time_required"}
 
-    # 1) 来週 + 曜日 + 時刻
     m = re.search(r"来週\s*(月曜?日?|火曜?日?|水曜?日?|木曜?日?|金曜?日?|土曜?日?|日曜?日?)", s)
     if m:
         wd_text = m.group(1)
@@ -546,7 +556,6 @@ def parse_datetime_input(text: str) -> dict | None:
             dt = datetime.combine(target_date, time(hh, mm), tzinfo=TZ)
             return {"kind": "single", "scheduled_at": dt, "time_hhmm": hhmm}
 
-    # 2) 今日 / 明日 / 明後日 + 時刻
     for key, add_days in [("今日", 0), ("明日", 1), ("明後日", 2)]:
         if key in s:
             hhmm = require_time_hhmm(s)
@@ -557,7 +566,6 @@ def parse_datetime_input(text: str) -> dict | None:
             dt = datetime.combine(target_date, time(hh, mm), tzinfo=TZ)
             return {"kind": "single", "scheduled_at": dt, "time_hhmm": hhmm}
 
-    # 3) YYYYMMDD
     m = re.search(r"\b(\d{4})(\d{2})(\d{2})\b", s)
     if m:
         y, mo, d = map(int, m.groups())
@@ -568,7 +576,6 @@ def parse_datetime_input(text: str) -> dict | None:
         dt = datetime(y, mo, d, hh, mm, tzinfo=TZ)
         return {"kind": "single", "scheduled_at": dt, "time_hhmm": hhmm}
 
-    # 4) YYYY-MM-DD
     m = re.search(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b", s)
     if m:
         y, mo, d = map(int, m.groups())
@@ -579,7 +586,6 @@ def parse_datetime_input(text: str) -> dict | None:
         dt = datetime(y, mo, d, hh, mm, tzinfo=TZ)
         return {"kind": "single", "scheduled_at": dt, "time_hhmm": hhmm}
 
-    # 5) M/D
     m = re.search(r"\b(\d{1,2})/(\d{1,2})\b", s)
     if m:
         mo, d = map(int, m.groups())
@@ -593,7 +599,6 @@ def parse_datetime_input(text: str) -> dict | None:
             dt = datetime(year + 1, mo, d, hh, mm, tzinfo=TZ)
         return {"kind": "single", "scheduled_at": dt, "time_hhmm": hhmm}
 
-    # 6) 曜日 + 時刻 => 毎週繰り返し
     weekday_found = None
     for key, value in WEEKDAY_MAP.items():
         if key in s:
@@ -606,7 +611,6 @@ def parse_datetime_input(text: str) -> dict | None:
             return need_time()
         return {"kind": "weekly", "weekday": weekday_found, "time_hhmm": hhmm}
 
-    # 7) 来週のみ => 来週の今日
     if "来週" in s:
         hhmm = require_time_hhmm(s)
         if not hhmm:
@@ -618,16 +622,17 @@ def parse_datetime_input(text: str) -> dict | None:
 
     return None
 
-def create_reminder(user_id: str, content: str, parsed: dict):
+
+def create_reminder(user_id: str, content: str, parsed: dict[str, Any]):
     with get_conn() as conn:
         if parsed["kind"] == "single":
             conn.execute(
                 """
                 INSERT INTO reminders (
                     user_id, content, kind, scheduled_at, weekday, time_hhmm,
-                    last_day_notice_date, last_1h_notice_date, last_10m_notice_date, created_at
+                    last_day_notice_date, last_1h_notice_date, last_10m_notice_date, last_exact_notice_date, created_at
                 )
-                VALUES (?, ?, 'single', ?, NULL, ?, NULL, NULL, NULL, ?)
+                VALUES (%s, %s, 'single', %s, NULL, %s, NULL, NULL, NULL, NULL, %s)
                 """,
                 (
                     user_id,
@@ -642,9 +647,9 @@ def create_reminder(user_id: str, content: str, parsed: dict):
                 """
                 INSERT INTO reminders (
                     user_id, content, kind, scheduled_at, weekday, time_hhmm,
-                    last_day_notice_date, last_1h_notice_date, last_10m_notice_date, created_at
+                    last_day_notice_date, last_1h_notice_date, last_10m_notice_date, last_exact_notice_date, created_at
                 )
-                VALUES (?, ?, 'weekly', NULL, ?, ?, NULL, NULL, NULL, ?)
+                VALUES (%s, %s, 'weekly', NULL, %s, %s, NULL, NULL, NULL, NULL, %s)
                 """,
                 (
                     user_id,
@@ -659,14 +664,15 @@ def create_reminder(user_id: str, content: str, parsed: dict):
 def add_want(user_id: str, content: str):
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO wants (user_id, content, created_at) VALUES (?, ?, ?)",
+            "INSERT INTO wants (user_id, content, created_at) VALUES (%s, %s, %s)",
             (user_id, content, now_jst().isoformat())
         )
+
 
 def delete_reminder_by_id(user_id: str, reminder_id: int) -> bool:
     with get_conn() as conn:
         cur = conn.execute(
-            "DELETE FROM reminders WHERE id = ? AND user_id = ?",
+            "DELETE FROM reminders WHERE id = %s AND user_id = %s",
             (reminder_id, user_id)
         )
         return cur.rowcount > 0
@@ -675,10 +681,11 @@ def delete_reminder_by_id(user_id: str, reminder_id: int) -> bool:
 def delete_want_by_id(user_id: str, want_id: int) -> bool:
     with get_conn() as conn:
         cur = conn.execute(
-            "DELETE FROM wants WHERE id = ? AND user_id = ?",
+            "DELETE FROM wants WHERE id = %s AND user_id = %s",
             (want_id, user_id)
         )
         return cur.rowcount > 0
+
 
 def list_reminders_text(user_id: str) -> str:
     with get_conn() as conn:
@@ -686,7 +693,7 @@ def list_reminders_text(user_id: str) -> str:
             """
             SELECT id, content, kind, scheduled_at, weekday, time_hhmm
             FROM reminders
-            WHERE user_id = ?
+            WHERE user_id = %s
             ORDER BY created_at DESC
             LIMIT 20
             """,
@@ -713,7 +720,7 @@ def list_wants_text(user_id: str) -> str:
             """
             SELECT id, content
             FROM wants
-            WHERE user_id = ?
+            WHERE user_id = %s
             ORDER BY created_at DESC
             LIMIT 20
             """,
@@ -725,7 +732,7 @@ def list_wants_text(user_id: str) -> str:
 
     lines = ["ほしいもの一覧"]
     for row in rows:
-        lines.append(f"・{row['content']}")
+        lines.append(f"・ID:{row['id']} / {row['content']}")
     return "\n".join(lines)
 
 
@@ -737,16 +744,12 @@ def should_timeout(updated_at_iso: str) -> bool:
 def handle_text_message(user_id: str, text: str, reply_token: str):
     state = get_state(user_id)
 
-    # =========================
-    # 未認証チェック（最優先）
-    # =========================
     if not is_authorized_user(user_id):
         locked, locked_until = is_auth_locked(user_id)
 
         if locked:
-            until_text = locked_until.strftime("%H:%M")
             send_reply(reply_token, [
-                text_message(f"入力を制限中だよ。しばらくしてからもう一度試してね。")
+                text_message("入力を制限中だよ。しばらくしてからもう一度試してね。")
             ])
             return
 
@@ -770,9 +773,8 @@ def handle_text_message(user_id: str, text: str, reply_token: str):
         failed_count, locked_until = register_auth_failure(user_id)
 
         if locked_until:
-            until_text = datetime.fromisoformat(locked_until).strftime("%H:%M")
             send_reply(reply_token, [
-                text_message(f"3回間違えたのでロックしたよ。しばらくしてから試してね。")
+                text_message("3回間違えたのでロックしたよ。しばらくしてから試してね。")
             ])
             return
 
@@ -781,10 +783,7 @@ def handle_text_message(user_id: str, text: str, reply_token: str):
             text_message(f"パスワードが違うよ。あと {remain} 回でロックされるよ。")
         ])
         return
-    
-    # =========================
-    # 状態タイムアウト
-    # =========================
+
     if should_timeout(state["updated_at"]) and state["state"] != STATE_NONE:
         reset_state(user_id)
         state = get_state(user_id)
@@ -820,7 +819,7 @@ def handle_text_message(user_id: str, text: str, reply_token: str):
     if text == "ほしいもの一覧":
         send_reply(reply_token, [text_message(list_wants_text(user_id)), want_menu_message()])
         return
-    
+
     if text == "リマインド削除":
         reminder_text = list_reminders_text(user_id)
         if reminder_text == "リマインダーはまだないよ。":
@@ -881,32 +880,32 @@ def handle_text_message(user_id: str, text: str, reply_token: str):
 
         if parsed and parsed.get("error") == "time_required":
             send_reply(reply_token, [text_message(
-            "時刻もいっしょに送ってね。\n"
-            "例：\n"
-            "・明日 10:00\n"
-            "・水曜日 08:00\n"
-            "・来週金曜日 15:00\n"
-            "・YYYYMMDD HH:MM\n"
-            "・M/D HH:MM\n"
-            "やめるときは「キャンセル」"
+                "時刻もいっしょに送ってね。\n"
+                "例：\n"
+                "・明日 10:00\n"
+                "・水曜日 08:00\n"
+                "・来週金曜日 15:00\n"
+                "・YYYYMMDD HH:MM\n"
+                "・M/D HH:MM\n"
+                "やめるときは「キャンセル」"
             )])
             return
 
         if not parsed:
             send_reply(reply_token, [text_message(
-            "日時がうまく読めなかったよ。\n"
-            "\n"
-            "次の形式で送ってね。\n"
-            "・明日 10:00\n"
-            "・水曜日 08:00\n"
-            "・来週金曜日 15:00\n"
-            "・10時\n"
-            "・10時30分\n"
-            "・3分後\n"
-            "・YYYYMMDD HH:MM\n"
-            "・M/D HH:MM\n"
-            "\n"
-            "やめるときは「キャンセル」"
+                "日時がうまく読めなかったよ。\n"
+                "\n"
+                "次の形式で送ってね。\n"
+                "・明日 10:00\n"
+                "・水曜日 08:00\n"
+                "・来週金曜日 15:00\n"
+                "・10時\n"
+                "・10時30分\n"
+                "・3分後\n"
+                "・YYYYMMDD HH:MM\n"
+                "・M/D HH:MM\n"
+                "\n"
+                "やめるときは「キャンセル」"
             )])
             return
 
@@ -932,7 +931,7 @@ def handle_text_message(user_id: str, text: str, reply_token: str):
             want_menu_message()
         ])
         return
-    
+
     if state["state"] == STATE_WAITING_REMINDER_DELETE:
         try:
             reminder_id = int(text.strip())
@@ -977,10 +976,7 @@ def handle_text_message(user_id: str, text: str, reply_token: str):
     ])
 
 
-def get_today_occurrences(row: sqlite3.Row, base_now: datetime) -> tuple[date, datetime] | None:
-    """
-    そのリマインダーが今日発生するなら (today, event_dt) を返す
-    """
+def get_today_occurrences(row: dict[str, Any], base_now: datetime) -> tuple[date, datetime] | None:
     today = base_now.date()
 
     if row["kind"] == "single":
@@ -999,9 +995,14 @@ def get_today_occurrences(row: sqlite3.Row, base_now: datetime) -> tuple[date, d
     return None
 
 
-def send_due_notifications():
+def send_due_notifications() -> dict[str, Any]:
     current = now_jst()
     today_str = current.date().isoformat()
+
+    sent_1h = 0
+    sent_10m = 0
+    sent_exact = 0
+    deleted_single = 0
 
     with get_conn() as conn:
         rows = conn.execute("SELECT * FROM reminders").fetchall()
@@ -1015,69 +1016,93 @@ def send_due_notifications():
             one_hour_before = event_dt - timedelta(hours=1)
             ten_min_before = event_dt - timedelta(minutes=10)
 
-            # 0:00通知
             if row["last_day_notice_date"] != today_str and current.hour == 0 and current.minute == 0:
                 send_push(row["user_id"], [text_message(f"今日の予定の一つだよ。\n{event_dt.strftime('%H:%M')} {row['content']}")])
                 conn.execute(
-                    "UPDATE reminders SET last_day_notice_date = ? WHERE id = ?",
+                    "UPDATE reminders SET last_day_notice_date = %s WHERE id = %s",
                     (today_str, row["id"])
                 )
 
-            # 1時間前通知
-            if row["last_1h_notice_date"] != today_str and current >= one_hour_before:
-                send_push(row["user_id"], [text_message(f"1時間前だよ。\n{event_dt.strftime('%H:%M')} {row['content']}")])
-                conn.execute(
-                    "UPDATE reminders SET last_1h_notice_date = ? WHERE id = ?",
-                    (today_str, row["id"])
-                )
+            if row["last_1h_notice_date"] != today_str:
+                if current >= one_hour_before and current < one_hour_before + timedelta(minutes=1):
+                    send_push(row["user_id"], [text_message(f"1時間前だよ！「{row['content']}」")])
+                    conn.execute(
+                        "UPDATE reminders SET last_1h_notice_date = %s WHERE id = %s",
+                        (today_str, row["id"])
+                    )
+                    sent_1h += 1
 
-            # 10分前通知
-            if row["last_10m_notice_date"] != today_str and current >= ten_min_before:
-                send_push(row["user_id"], [text_message(f"10分前だよ。\n{event_dt.strftime('%H:%M')} {row['content']}")])
-                conn.execute(
-                    "UPDATE reminders SET last_10m_notice_date = ? WHERE id = ?",
-                    (today_str, row["id"])
-                )
+            if row["last_10m_notice_date"] != today_str:
+                if current >= ten_min_before and current < ten_min_before + timedelta(minutes=1):
+                    send_push(row["user_id"], [text_message(f"10分前だよ！「{row['content']}」")])
+                    conn.execute(
+                        "UPDATE reminders SET last_10m_notice_date = %s WHERE id = %s",
+                        (today_str, row["id"])
+                    )
+                    sent_10m += 1
 
-        # 単発予定の削除
-        conn.execute(
+            if row["last_exact_notice_date"] != today_str:
+                if current >= event_dt and current < event_dt + timedelta(minutes=1):
+                    send_push(row["user_id"], [text_message(f"「{row['content']}」の時間だよ！")])
+                    conn.execute(
+                        "UPDATE reminders SET last_exact_notice_date = %s WHERE id = %s",
+                        (today_str, row["id"])
+                    )
+                    sent_exact += 1
+
+        deleted_cur = conn.execute(
             """
             DELETE FROM reminders
             WHERE kind = 'single'
-              AND datetime(scheduled_at) < datetime(?)
+              AND CAST(scheduled_at AS timestamptz) < CAST(%s AS timestamptz)
             """,
             (current.isoformat(),)
         )
+        deleted_single = deleted_cur.rowcount
 
-        # 状態のタイムアウト
         timeout_border = (current - timedelta(minutes=10)).isoformat()
         conn.execute(
             """
             UPDATE user_states
-            SET state = ?, temp_content = NULL, updated_at = ?
-            WHERE state != ?
-              AND updated_at < ?
+            SET state = %s, temp_content = NULL, updated_at = %s
+            WHERE state != %s
+              AND updated_at < %s
             """,
             (STATE_NONE, current.isoformat(), STATE_NONE, timeout_border)
         )
+
+    return {
+        "ok": True,
+        "sent_1h": sent_1h,
+        "sent_10m": sent_10m,
+        "sent_exact": sent_exact,
+        "deleted_single": deleted_single,
+        "checked_at": current.isoformat(),
+    }
 
 
 @app.on_event("startup")
 def startup():
     init_db()
-    scheduler.add_job(send_due_notifications, "interval", minutes=1, id="notify_job", replace_existing=True)
-    scheduler.start()
 
 
 @app.on_event("shutdown")
 def shutdown():
-    if scheduler.running:
-        scheduler.shutdown()
+    return
 
 
 @app.get("/")
 def healthcheck():
     return {"ok": True}
+
+
+@app.post("/jobs/send-due-notifications")
+async def run_send_due_notifications(x_cron_secret: str = Header(None)):
+    if x_cron_secret != CRON_SECRET:
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+    result = send_due_notifications()
+    return JSONResponse(result)
 
 
 @app.post("/callback")
