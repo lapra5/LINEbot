@@ -486,7 +486,7 @@ def require_time_hhmm(s: str) -> str | None:
 
 def parse_relative_datetime(s: str) -> datetime | None:
     s = normalize_digits(s)
-    now = now_jst()
+    now = now_jst().replace(second=0, microsecond=0)
 
     m = re.search(r"(\d+)\s*分後", s)
     if m:
@@ -499,7 +499,6 @@ def parse_relative_datetime(s: str) -> datetime | None:
         return now + timedelta(hours=hours)
 
     return None
-
 
 def parse_time_only_datetime(s: str) -> tuple[datetime, str] | None:
     hhmm = parse_time_hhmm(s)
