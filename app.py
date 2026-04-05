@@ -236,6 +236,13 @@ def authorize_user(user_id: str):
             (user_id, now_jst().isoformat())
         )
 
+def unauthorize_user(user_id: str):
+    with get_conn() as conn:
+        conn.execute(
+            "DELETE FROM authorized_users WHERE user_id = %s",
+             (user_id,)
+        )
+
 
 def get_auth_attempt(user_id: str) -> dict[str, Any]:
     with get_conn() as conn:
@@ -1963,9 +1970,11 @@ async def callback(request: Request, x_line_signature: str = Header(None)):
         if isinstance(event, FollowEvent):
             user_id = getattr(event.source, "user_id", None)
             if user_id and event.reply_token:
+                unauthorize_user(user_id)
+                reset_auth_attempt(user_id)
+                set_state(user_id, STATE_WAITING_PASSWORD, None)
                 send_reply(event.reply_token, [
-                    text_message("友だち追加ありがとう！"),
-                    main_menu_message()
+                    text_message("友だち追加ありがとう！\nこのBotを使うにはパスワードを入力してね。")
                 ])
 
         if isinstance(event, MessageEvent) and isinstance(event.message, TextMessageContent):
