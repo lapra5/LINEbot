@@ -1315,14 +1315,30 @@ async function loadAllReminderViews() {{
 }}
 
 async function boot() {{
-  await liff.init({{ liffId: LIFF_ID }});
-  if (!liff.isLoggedIn()) {{
-    liff.login();
-    return;
+  try {{
+    await liff.init({{ liffId: LIFF_ID }});
+
+    if (!liff.isLoggedIn()) {{
+      liff.login();
+      return;
+    }}
+
+    const decoded = liff.getDecodedIDToken();
+    userId = decoded?.sub || "";
+
+    if (!userId) {{
+      throw new Error("userId を取得できなかったよ。");
+    }}
+
+    await loadAllReminderViews();
+  }} catch (err) {{
+    document.body.innerHTML = `
+      <div style="padding:16px;font-family:sans-serif;">
+        <h3>LIFFの読み込みに失敗したよ</h3>
+        <pre style="white-space:pre-wrap;">${{String(err)}}</pre>
+      </div>
+    `;
   }}
-  const profile = await liff.getProfile();
-  userId = profile.userId;
-  await loadAllReminderViews();
 }}
 
 boot();
@@ -1533,7 +1549,34 @@ async function loadWants() {{
 
 async function boot() {{
   await liff.init({{ liffId: LIFF_ID }});
-  if (!liff.isLoggedIn()) {{
+  if (!liff.isLasync function boot() {{
+  try {{
+    await liff.init({{ liffId: LIFF_ID }});
+
+    if (!liff.isLoggedIn()) {{
+      liff.login();
+      return;
+    }}
+
+    const decoded = liff.getDecodedIDToken();
+    userId = decoded?.sub || "";
+
+    if (!userId) {{
+      throw new Error("userId を取得できなかったよ。");
+    }}
+
+    await loadWants();
+  }} catch (err) {{
+    document.body.innerHTML = `
+      <div style="padding:16px;font-family:sans-serif;">
+        <h3>LIFFの読み込みに失敗したよ</h3>
+        <pre style="white-space:pre-wrap;">${{String(err)}}</pre>
+      </div>
+    `;
+  }}
+}}
+
+boot();oggedIn()) {{
     liff.login();
     return;
   }}
