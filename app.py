@@ -71,9 +71,7 @@ STATE_NONE = "none"
 STATE_WAITING_PASSWORD = "waiting_password"
 STATE_WAITING_REMINDER_CONTENT = "waiting_reminder_content"
 STATE_WAITING_REMINDER_DATETIME = "waiting_reminder_datetime"
-STATE_WAITING_REMINDER_DELETE = "waiting_reminder_delete"
 STATE_WAITING_WANT_CONTENT = "waiting_want_content"
-STATE_WAITING_WANT_DELETE = "waiting_want_delete"
 
 WEEKDAY_MAP = {
     "月": 0, "月曜": 0, "月曜日": 0,
@@ -344,21 +342,6 @@ def text_message(text: str, quick_reply: QuickReply | None = None) -> TextMessag
     return TextMessage(text=text, quick_reply=quick_reply)
 
 
-def safe_date_str(y: int, m: int, d: int) -> str:
-    zw = "\u200b"
-    return f"{y}-{zw}{m:02d}-{zw}{d:02d}"
-
-
-def format_single_datetime_jp(dt: datetime) -> str:
-    dt = dt.astimezone(TZ)
-    safe_date = safe_date_str(dt.year, dt.month, dt.day)
-    return f"{safe_date}（{JP_WEEK_FULL[dt.weekday()]}） {dt.strftime('%H:%M')}"
-
-
-def format_weekly_label(weekday: int, hhmm: str) -> str:
-    return f"毎週 {JP_WEEK_FULL[weekday]} {hhmm}"
-
-
 def liff_quick_reply(menu_type: str) -> QuickReply:
     if menu_type == "reminder":
         items = [
@@ -373,6 +356,21 @@ def liff_quick_reply(menu_type: str) -> QuickReply:
             QuickReplyItem(action=MessageAction(label="メニューに戻る", text="メニュー")),
         ]
     return QuickReply(items=items)
+
+
+def safe_date_str(y: int, m: int, d: int) -> str:
+    zw = "\u200b"
+    return f"{y}-{zw}{m:02d}-{zw}{d:02d}"
+
+
+def format_single_datetime_jp(dt: datetime) -> str:
+    dt = dt.astimezone(TZ)
+    safe_date = safe_date_str(dt.year, dt.month, dt.day)
+    return f"{safe_date}（{JP_WEEK_FULL[dt.weekday()]}） {dt.strftime('%H:%M')}"
+
+
+def format_weekly_label(weekday: int, hhmm: str) -> str:
+    return f"毎週 {JP_WEEK_FULL[weekday]} {hhmm}"
 
 
 def main_menu_message() -> FlexMessage:
@@ -855,12 +853,21 @@ def wants_row_to_card(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def get_user_id_from_header(x_user_id: str | None) -> str:
-    if not x_user_id:
-        raise HTTPException(status_code=400, detail="x-user-id がありません。")
-    if not is_authorized_user(x_user_id):
-        raise HTTPException(status_code=403, detail="unauthorized user")
-    return x_user_id
+def get_liff_owner_user_id() -> str:
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT user_id
+            FROM authorized_users
+            ORDER BY authorized_at ASC
+            LIMIT 1
+            """
+        ).fetchone()
+
+    if not row:
+        raise HTTPException(status_code=403, detail="authorized user not found")
+
+    return row["user_id"]
 
 
 def build_reminders_liff_html() -> str:
@@ -1120,9 +1127,7 @@ def build_reminders_liff_html() -> str:
 
 <script>
 const LIFF_ID = "{LIFF_REMINDER_ID}";
-let userId = "";
 let deleteTargetId = null;
-let deleteTargetContent = "";
 let currentCalendarDate = new Date();
 let selectedDate = null;
 
@@ -1135,7 +1140,9 @@ const deleteModal = document.getElementById("deleteModal");
 const deleteText = document.getElementById("deleteText");
 
 document.getElementById("closeBtn").addEventListener("click", () => {{
-  if (window.liff) liff.closeWindow();
+  if (window.liff) {{
+    liff.closeWindow();
+  }}
 }});
 
 document.querySelectorAll(".tab").forEach(btn => {{
@@ -1155,10 +1162,7 @@ document.getElementById("deleteNo").addEventListener("click", () => {{
 document.getElementById("deleteYes").addEventListener("click", async () => {{
   if (!deleteTargetId) return;
   await fetch(`/api/reminders/${{deleteTargetId}}`, {{
-    method: "DELETE",
-    headers: {{
-      "x-user-id": userId
-    }}
+    method: "DELETE"
   }});
   deleteModal.classList.remove("show");
   deleteTargetId = null;
@@ -1177,32 +1181,12 @@ document.getElementById("nextMonth").addEventListener("click", async () => {{
 
 function openDeleteModal(id, content) {{
   deleteTargetId = id;
-  deleteTargetContent = content;
   deleteText.textContent = `「${{content}}」を削除しますか？`;
   deleteModal.classList.add("show");
 }}
 
-function renderReminderCards(target, items, emptyText) {{
-  if (!items.length) {{
-    target.innerHTML = `<div class="empty">${{emptyText}}</div>`;
-    return;
-  }}
-
-  target.innerHTML = items.map(item => `
-    <div class="card">
-      <button class="card-x" onclick='openDeleteModal(${{item.id}}, ${{JSON.stringify(item.content)}})'>×</button>
-      <div class="card-top">
-        <span>${{item.date}}</span>
-        <span>${{item.weekday}}</span>
-        <span>${{item.time}}</span>
-      </div>
-      <div class="card-content">${{escapeHtml(item.content)}}</div>
-    </div>
-  `).join("");
-}}
-
 function escapeHtml(text) {{
-  return text
+  return String(text)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -1210,12 +1194,33 @@ function escapeHtml(text) {{
     .replace(/'/g, "&#039;");
 }}
 
-async function apiGet(url) {{
-  const res = await fetch(url, {{
-    headers: {{
-      "x-user-id": userId
-    }}
+function renderReminderCards(target, items, emptyText) {{
+  if (!items.length) {{
+    target.innerHTML = `<div class="empty">${{escapeHtml(emptyText)}}</div>`;
+    return;
+  }}
+
+  target.innerHTML = items.map(item => `
+    <div class="card">
+      <button class="card-x" data-id="${{item.id}}" data-content="${{escapeHtml(item.content)}}">×</button>
+      <div class="card-top">
+        <span>${{escapeHtml(item.date || "")}}</span>
+        <span>${{escapeHtml(item.weekday || "")}}</span>
+        <span>${{escapeHtml(item.time || "")}}</span>
+      </div>
+      <div class="card-content">${{escapeHtml(item.content)}}</div>
+    </div>
+  `).join("");
+
+  target.querySelectorAll(".card-x").forEach(btn => {{
+    btn.addEventListener("click", () => {{
+      openDeleteModal(Number(btn.dataset.id), btn.dataset.content);
+    }});
   }});
+}}
+
+async function apiGet(url) {{
+  const res = await fetch(url);
   if (!res.ok) throw new Error(await res.text());
   return await res.json();
 }}
@@ -1251,7 +1256,6 @@ function renderCalendarGrid(days, year, month) {{
   const firstDay = new Date(year, month - 1, 1);
   const startWeekday = firstDay.getDay();
   const lastDate = new Date(year, month, 0).getDate();
-
   const prevLastDate = new Date(year, month - 1, 0).getDate();
 
   let cells = [];
@@ -1279,7 +1283,7 @@ function renderCalendarGrid(days, year, month) {{
 
   while (cells.length % 7 !== 0) {{
     cells.push({{
-      day: cells.length,
+      day: "",
       date: "",
       has_items: false,
       other: true
@@ -1292,6 +1296,7 @@ function renderCalendarGrid(days, year, month) {{
     if (cell.other) btn.classList.add("other");
     if (cell.date && cell.date === selectedDate) btn.classList.add("selected");
     btn.innerHTML = `<span>${{cell.day}}</span>${{cell.has_items ? '<span class="dot"></span>' : ''}}`;
+
     if (cell.date) {{
       btn.addEventListener("click", async () => {{
         selectedDate = cell.date;
@@ -1299,6 +1304,7 @@ function renderCalendarGrid(days, year, month) {{
         await loadCalendarItems(cell.date);
       }});
     }}
+
     calendarGrid.appendChild(btn);
   }});
 }}
@@ -1323,19 +1329,12 @@ async function boot() {{
       return;
     }}
 
-    const decoded = liff.getDecodedIDToken();
-    userId = decoded?.sub || "";
-
-    if (!userId) {{
-      throw new Error("userId を取得できなかったよ。");
-    }}
-
     await loadAllReminderViews();
   }} catch (err) {{
     document.body.innerHTML = `
       <div style="padding:16px;font-family:sans-serif;">
         <h3>LIFFの読み込みに失敗したよ</h3>
-        <pre style="white-space:pre-wrap;">${{String(err)}}</pre>
+        <pre style="white-space:pre-wrap;">${{escapeHtml(String(err))}}</pre>
       </div>
     `;
   }}
@@ -1478,7 +1477,6 @@ def build_wants_liff_html() -> str:
 
 <script>
 const LIFF_ID = "{LIFF_WANT_ID}";
-let userId = "";
 let deleteTargetId = null;
 
 const wantList = document.getElementById("wantList");
@@ -1486,7 +1484,9 @@ const deleteModal = document.getElementById("deleteModal");
 const deleteText = document.getElementById("deleteText");
 
 document.getElementById("closeBtn").addEventListener("click", () => {{
-  if (window.liff) liff.closeWindow();
+  if (window.liff) {{
+    liff.closeWindow();
+  }}
 }});
 
 document.getElementById("deleteNo").addEventListener("click", () => {{
@@ -1497,10 +1497,7 @@ document.getElementById("deleteNo").addEventListener("click", () => {{
 document.getElementById("deleteYes").addEventListener("click", async () => {{
   if (!deleteTargetId) return;
   await fetch(`/api/wants/${{deleteTargetId}}`, {{
-    method: "DELETE",
-    headers: {{
-      "x-user-id": userId
-    }}
+    method: "DELETE"
   }});
   deleteModal.classList.remove("show");
   deleteTargetId = null;
@@ -1514,7 +1511,7 @@ function openDeleteModal(id, content) {{
 }}
 
 function escapeHtml(text) {{
-  return text
+  return String(text)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -1523,11 +1520,7 @@ function escapeHtml(text) {{
 }}
 
 async function apiGet(url) {{
-  const res = await fetch(url, {{
-    headers: {{
-      "x-user-id": userId
-    }}
-  }});
+  const res = await fetch(url);
   if (!res.ok) throw new Error(await res.text());
   return await res.json();
 }}
@@ -1541,15 +1534,19 @@ async function loadWants() {{
 
   wantList.innerHTML = data.items.map(item => `
     <div class="card">
-      <button class="card-x" onclick='openDeleteModal(${{item.id}}, ${{JSON.stringify(item.content)}})'>×</button>
+      <button class="card-x" data-id="${{item.id}}" data-content="${{escapeHtml(item.content)}}">×</button>
       <div class="card-content">${{escapeHtml(item.content)}}</div>
     </div>
   `).join("");
+
+  wantList.querySelectorAll(".card-x").forEach(btn => {{
+    btn.addEventListener("click", () => {{
+      openDeleteModal(Number(btn.dataset.id), btn.dataset.content);
+    }});
+  }});
 }}
 
 async function boot() {{
-  await liff.init({{ liffId: LIFF_ID }});
-  if (!liff.isLasync function boot() {{
   try {{
     await liff.init({{ liffId: LIFF_ID }});
 
@@ -1558,31 +1555,15 @@ async function boot() {{
       return;
     }}
 
-    const decoded = liff.getDecodedIDToken();
-    userId = decoded?.sub || "";
-
-    if (!userId) {{
-      throw new Error("userId を取得できなかったよ。");
-    }}
-
     await loadWants();
   }} catch (err) {{
     document.body.innerHTML = `
       <div style="padding:16px;font-family:sans-serif;">
         <h3>LIFFの読み込みに失敗したよ</h3>
-        <pre style="white-space:pre-wrap;">${{String(err)}}</pre>
+        <pre style="white-space:pre-wrap;">${{escapeHtml(String(err))}}</pre>
       </div>
     `;
   }}
-}}
-
-boot();oggedIn()) {{
-    liff.login();
-    return;
-  }}
-  const profile = await liff.getProfile();
-  userId = profile.userId;
-  await loadWants();
 }}
 
 boot();
@@ -1791,8 +1772,8 @@ def liff_wants():
 
 
 @app.get("/api/reminders/one-time")
-def api_reminders_one_time(x_user_id: str | None = Header(default=None)):
-    user_id = get_user_id_from_header(x_user_id)
+def api_reminders_one_time():
+    user_id = get_liff_owner_user_id()
     with get_conn() as conn:
         rows = conn.execute(
             """
@@ -1807,8 +1788,8 @@ def api_reminders_one_time(x_user_id: str | None = Header(default=None)):
 
 
 @app.get("/api/reminders/repeat")
-def api_reminders_repeat(x_user_id: str | None = Header(default=None)):
-    user_id = get_user_id_from_header(x_user_id)
+def api_reminders_repeat():
+    user_id = get_liff_owner_user_id()
     with get_conn() as conn:
         rows = conn.execute(
             """
@@ -1823,8 +1804,8 @@ def api_reminders_repeat(x_user_id: str | None = Header(default=None)):
 
 
 @app.get("/api/reminders/calendar")
-def api_reminders_calendar(year: int, month: int, x_user_id: str | None = Header(default=None)):
-    user_id = get_user_id_from_header(x_user_id)
+def api_reminders_calendar(year: int, month: int):
+    user_id = get_liff_owner_user_id()
     start_date = date(year, month, 1)
     if month == 12:
         next_date = date(year + 1, 1, 1)
@@ -1859,8 +1840,11 @@ def api_reminders_calendar(year: int, month: int, x_user_id: str | None = Header
 
 
 @app.get("/api/reminders/by-date")
-def api_reminders_by_date(date: str, x_user_id: str | None = Header(default=None)):
-    user_id = get_user_id_from_header(x_user_id)
+def api_reminders_by_date(date: str):
+    user_id = get_liff_owner_user_id()
+    start_dt = datetime.fromisoformat(f"{date}T00:00:00+09:00")
+    end_dt = datetime.fromisoformat(f"{date}T23:59:59+09:00")
+
     with get_conn() as conn:
         rows = conn.execute(
             """
@@ -1869,28 +1853,24 @@ def api_reminders_by_date(date: str, x_user_id: str | None = Header(default=None
             WHERE user_id = %s
               AND kind = 'single'
               AND CAST(scheduled_at AS timestamptz) >= CAST(%s AS timestamptz)
-              AND CAST(scheduled_at AS timestamptz) < CAST(%s AS timestamptz)
+              AND CAST(scheduled_at AS timestamptz) <= CAST(%s AS timestamptz)
             ORDER BY CAST(scheduled_at AS timestamptz) ASC
             """,
-            (
-                user_id,
-                datetime.fromisoformat(f"{date}T00:00:00+09:00").isoformat(),
-                datetime.fromisoformat(f"{date}T23:59:59+09:00").isoformat(),
-            )
+            (user_id, start_dt.isoformat(), end_dt.isoformat())
         ).fetchall()
     return {"items": [reminder_row_to_card(x) for x in rows]}
 
 
 @app.delete("/api/reminders/{reminder_id}")
-def api_delete_reminder(reminder_id: int, x_user_id: str | None = Header(default=None)):
-    user_id = get_user_id_from_header(x_user_id)
+def api_delete_reminder(reminder_id: int):
+    user_id = get_liff_owner_user_id()
     ok = delete_reminder_by_id(user_id, reminder_id)
     return {"ok": ok}
 
 
 @app.get("/api/wants")
-def api_wants(x_user_id: str | None = Header(default=None)):
-    user_id = get_user_id_from_header(x_user_id)
+def api_wants():
+    user_id = get_liff_owner_user_id()
     with get_conn() as conn:
         rows = conn.execute(
             """
@@ -1905,8 +1885,8 @@ def api_wants(x_user_id: str | None = Header(default=None)):
 
 
 @app.delete("/api/wants/{want_id}")
-def api_delete_want(want_id: int, x_user_id: str | None = Header(default=None)):
-    user_id = get_user_id_from_header(x_user_id)
+def api_delete_want(want_id: int):
+    user_id = get_liff_owner_user_id()
     ok = delete_want_by_id(user_id, want_id)
     return {"ok": ok}
 
