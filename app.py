@@ -7,6 +7,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import psycopg
+import requests
 from psycopg.rows import dict_row
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -44,6 +45,7 @@ BOT_PASSWORD = os.getenv("BOT_PASSWORD", "")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 CRON_SECRET = os.getenv("CRON_SECRET", "")
 
+LINE_LOGIN_CHANNEL_ID = os.getenv("LINE_LOGIN_CHANNEL_ID", "")
 LIFF_REMINDER_ID = os.getenv("LIFF_REMINDER_ID", "")
 LIFF_WANT_ID = os.getenv("LIFF_WANT_ID", "")
 LIFF_REMINDER_URL = os.getenv("LIFF_REMINDER_URL", "")
@@ -59,6 +61,9 @@ if not DATABASE_URL:
 
 if not CRON_SECRET:
     raise RuntimeError("環境変数 CRON_SECRET を設定してください。")
+
+if not LINE_LOGIN_CHANNEL_ID:
+    raise RuntimeError("環境変数 LINE_LOGIN_CHANNEL_ID を設定してください。")
 
 if not LIFF_REMINDER_ID or not LIFF_WANT_ID or not LIFF_REMINDER_URL or not LIFF_WANT_URL:
     raise RuntimeError("環境変数 LIFF_REMINDER_ID / LIFF_WANT_ID / LIFF_REMINDER_URL / LIFF_WANT_URL を設定してください。")
@@ -853,21 +858,31 @@ def wants_row_to_card(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def get_liff_owner_user_id() -> str:
-    with get_conn() as conn:
-        row = conn.execute(
-            """
-            SELECT user_id
-            FROM authorized_users
-            ORDER BY authorized_at ASC
-            LIMIT 1
-            """
-        ).fetchone()
+def verify_line_id_token(id_token: str) -> dict[str, Any]:
+    res = requests.post(
+        "https://api.line.me/oauth2/v2.1/verify",
+        data={
+            "id_token": id_token,
+            "client_id": LINE_LOGIN_CHANNEL_ID,
+        },
+        timeout=20,
+    )
+    if not res.ok:
+        raise HTTPException(status_code=401, detail="invalid id token")
+    return res.json()
 
-    if not row:
-        raise HTTPException(status_code=403, detail="authorized user not found")
 
-    return row["user_id"]
+def get_user_id_from_verified_id_token(x_line_id_token: str | None) -> str:
+    if not x_line_id_token:
+        raise HTTPException(status_code=401, detail="x-line-id-token がありません。")
+
+    verified = verify_line_id_token(x_line_id_token)
+    user_id = verified.get("sub", "")
+
+    if not user_id:
+        raise HTTPException(status_code=401, detail="user id not found in id token")
+
+    return user_id
 
 
 def build_reminders_liff_html() -> str:
@@ -1127,6 +1142,7 @@ def build_reminders_liff_html() -> str:
 
 <script>
 const LIFF_ID = "{LIFF_REMINDER_ID}";
+let idToken = "";
 let deleteTargetId = null;
 let currentCalendarDate = new Date();
 let selectedDate = null;
@@ -1140,9 +1156,7 @@ const deleteModal = document.getElementById("deleteModal");
 const deleteText = document.getElementById("deleteText");
 
 document.getElementById("closeBtn").addEventListener("click", () => {{
-  if (window.liff) {{
-    liff.closeWindow();
-  }}
+  if (window.liff) liff.closeWindow();
 }});
 
 document.querySelectorAll(".tab").forEach(btn => {{
@@ -1162,7 +1176,10 @@ document.getElementById("deleteNo").addEventListener("click", () => {{
 document.getElementById("deleteYes").addEventListener("click", async () => {{
   if (!deleteTargetId) return;
   await fetch(`/api/reminders/${{deleteTargetId}}`, {{
-    method: "DELETE"
+    method: "DELETE",
+    headers: {{
+      "x-line-id-token": idToken
+    }}
   }});
   deleteModal.classList.remove("show");
   deleteTargetId = null;
@@ -1194,33 +1211,19 @@ function escapeHtml(text) {{
     .replace(/'/g, "&#039;");
 }}
 
-function renderReminderCards(target, items, emptyText) {{
-  if (!items.length) {{
-    target.innerHTML = `<div class="empty">${{escapeHtml(emptyText)}}</div>`;
-    return;
-  }}
+function authHeaders() {{
+  return {{
+    "x-line-id-token": idToken
+  }};
+}}
 
-  target.innerHTML = items.map(item => `
-    <div class="card">
-      <button class="card-x" data-id="${{item.id}}" data-content="${{escapeHtml(item.content)}}">×</button>
-      <div class="card-top">
-        <span>${{escapeHtml(item.date || "")}}</span>
-        <span>${{escapeHtml(item.weekday || "")}}</span>
-        <span>${{escapeHtml(item.time || "")}}</span>
-      </div>
-      <div class="card-content">${{escapeHtml(item.content)}}</div>
-    </div>
-  `).join("");
-
-  target.querySelectorAll(".card-x").forEach(btn => {{
-    btn.addEventListener("click", () => {{
-      openDeleteModal(Number(btn.dataset.id), btn.dataset.content);
-    }});
-  }});
+function withAuth(url, options = {{}}) {{
+  const headers = Object.assign({{}}, options.headers || {{}}, authHeaders());
+  return fetch(url, Object.assign({{}}, options, {{ headers }}));
 }}
 
 async function apiGet(url) {{
-  const res = await fetch(url);
+  const res = await withAuth(url);
   if (!res.ok) throw new Error(await res.text());
   return await res.json();
 }}
@@ -1314,6 +1317,31 @@ async function loadCalendarItems(dateStr) {{
   renderReminderCards(calendarItems, data.items, "この日の予定はないよ。");
 }}
 
+function renderReminderCards(target, items, emptyText) {{
+  if (!items.length) {{
+    target.innerHTML = `<div class="empty">${{escapeHtml(emptyText)}}</div>`;
+    return;
+  }}
+
+  target.innerHTML = items.map(item => `
+    <div class="card">
+      <button class="card-x" data-id="${{item.id}}" data-content="${{escapeHtml(item.content)}}">×</button>
+      <div class="card-top">
+        <span>${{escapeHtml(item.date || "")}}</span>
+        <span>${{escapeHtml(item.weekday || "")}}</span>
+        <span>${{escapeHtml(item.time || "")}}</span>
+      </div>
+      <div class="card-content">${{escapeHtml(item.content)}}</div>
+    </div>
+  `).join("");
+
+  target.querySelectorAll(".card-x").forEach(btn => {{
+    btn.addEventListener("click", () => {{
+      openDeleteModal(Number(btn.dataset.id), btn.dataset.content);
+    }});
+  }});
+}}
+
 async function loadAllReminderViews() {{
   await loadSingleList();
   await loadRepeatList();
@@ -1327,6 +1355,11 @@ async function boot() {{
     if (!liff.isLoggedIn()) {{
       liff.login();
       return;
+    }}
+
+    idToken = liff.getIDToken() || "";
+    if (!idToken) {{
+      throw new Error("IDトークンを取得できなかったよ。LIFFのscopeで openid を確認してね。");
     }}
 
     await loadAllReminderViews();
@@ -1477,6 +1510,7 @@ def build_wants_liff_html() -> str:
 
 <script>
 const LIFF_ID = "{LIFF_WANT_ID}";
+let idToken = "";
 let deleteTargetId = null;
 
 const wantList = document.getElementById("wantList");
@@ -1484,9 +1518,7 @@ const deleteModal = document.getElementById("deleteModal");
 const deleteText = document.getElementById("deleteText");
 
 document.getElementById("closeBtn").addEventListener("click", () => {{
-  if (window.liff) {{
-    liff.closeWindow();
-  }}
+  if (window.liff) liff.closeWindow();
 }});
 
 document.getElementById("deleteNo").addEventListener("click", () => {{
@@ -1497,7 +1529,10 @@ document.getElementById("deleteNo").addEventListener("click", () => {{
 document.getElementById("deleteYes").addEventListener("click", async () => {{
   if (!deleteTargetId) return;
   await fetch(`/api/wants/${{deleteTargetId}}`, {{
-    method: "DELETE"
+    method: "DELETE",
+    headers: {{
+      "x-line-id-token": idToken
+    }}
   }});
   deleteModal.classList.remove("show");
   deleteTargetId = null;
@@ -1519,8 +1554,15 @@ function escapeHtml(text) {{
     .replace(/'/g, "&#039;");
 }}
 
+function withAuth(url, options = {{}}) {{
+  const headers = Object.assign({{}}, options.headers || {{}}, {{
+    "x-line-id-token": idToken
+  }});
+  return fetch(url, Object.assign({{}}, options, {{ headers }}));
+}}
+
 async function apiGet(url) {{
-  const res = await fetch(url);
+  const res = await withAuth(url);
   if (!res.ok) throw new Error(await res.text());
   return await res.json();
 }}
@@ -1553,6 +1595,11 @@ async function boot() {{
     if (!liff.isLoggedIn()) {{
       liff.login();
       return;
+    }}
+
+    idToken = liff.getIDToken() || "";
+    if (!idToken) {{
+      throw new Error("IDトークンを取得できなかったよ。LIFFのscopeで openid を確認してね。");
     }}
 
     await loadWants();
@@ -1772,8 +1819,8 @@ def liff_wants():
 
 
 @app.get("/api/reminders/one-time")
-def api_reminders_one_time():
-    user_id = get_liff_owner_user_id()
+def api_reminders_one_time(x_line_id_token: str | None = Header(default=None)):
+    user_id = get_user_id_from_verified_id_token(x_line_id_token)
     with get_conn() as conn:
         rows = conn.execute(
             """
@@ -1788,8 +1835,8 @@ def api_reminders_one_time():
 
 
 @app.get("/api/reminders/repeat")
-def api_reminders_repeat():
-    user_id = get_liff_owner_user_id()
+def api_reminders_repeat(x_line_id_token: str | None = Header(default=None)):
+    user_id = get_user_id_from_verified_id_token(x_line_id_token)
     with get_conn() as conn:
         rows = conn.execute(
             """
@@ -1804,8 +1851,8 @@ def api_reminders_repeat():
 
 
 @app.get("/api/reminders/calendar")
-def api_reminders_calendar(year: int, month: int):
-    user_id = get_liff_owner_user_id()
+def api_reminders_calendar(year: int, month: int, x_line_id_token: str | None = Header(default=None)):
+    user_id = get_user_id_from_verified_id_token(x_line_id_token)
     start_date = date(year, month, 1)
     if month == 12:
         next_date = date(year + 1, 1, 1)
@@ -1840,8 +1887,8 @@ def api_reminders_calendar(year: int, month: int):
 
 
 @app.get("/api/reminders/by-date")
-def api_reminders_by_date(date: str):
-    user_id = get_liff_owner_user_id()
+def api_reminders_by_date(date: str, x_line_id_token: str | None = Header(default=None)):
+    user_id = get_user_id_from_verified_id_token(x_line_id_token)
     start_dt = datetime.fromisoformat(f"{date}T00:00:00+09:00")
     end_dt = datetime.fromisoformat(f"{date}T23:59:59+09:00")
 
@@ -1862,15 +1909,15 @@ def api_reminders_by_date(date: str):
 
 
 @app.delete("/api/reminders/{reminder_id}")
-def api_delete_reminder(reminder_id: int):
-    user_id = get_liff_owner_user_id()
+def api_delete_reminder(reminder_id: int, x_line_id_token: str | None = Header(default=None)):
+    user_id = get_user_id_from_verified_id_token(x_line_id_token)
     ok = delete_reminder_by_id(user_id, reminder_id)
     return {"ok": ok}
 
 
 @app.get("/api/wants")
-def api_wants():
-    user_id = get_liff_owner_user_id()
+def api_wants(x_line_id_token: str | None = Header(default=None)):
+    user_id = get_user_id_from_verified_id_token(x_line_id_token)
     with get_conn() as conn:
         rows = conn.execute(
             """
@@ -1885,8 +1932,8 @@ def api_wants():
 
 
 @app.delete("/api/wants/{want_id}")
-def api_delete_want(want_id: int):
-    user_id = get_liff_owner_user_id()
+def api_delete_want(want_id: int, x_line_id_token: str | None = Header(default=None)):
+    user_id = get_user_id_from_verified_id_token(x_line_id_token)
     ok = delete_want_by_id(user_id, want_id)
     return {"ok": ok}
 
