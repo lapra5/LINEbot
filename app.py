@@ -10,7 +10,7 @@ import psycopg
 from psycopg.rows import dict_row
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from linebot.v3 import WebhookParser
 from linebot.v3.exceptions import InvalidSignatureError
@@ -27,8 +27,11 @@ from linebot.v3.messaging import (
     MessageAction,
     MessagingApi,
     PushMessageRequest,
+    QuickReply,
+    QuickReplyItem,
     ReplyMessageRequest,
     TextMessage,
+    URIAction,
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent, FollowEvent
 
@@ -41,6 +44,11 @@ BOT_PASSWORD = os.getenv("BOT_PASSWORD", "")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 CRON_SECRET = os.getenv("CRON_SECRET", "")
 
+LIFF_REMINDER_ID = os.getenv("LIFF_REMINDER_ID", "")
+LIFF_WANT_ID = os.getenv("LIFF_WANT_ID", "")
+LIFF_REMINDER_URL = os.getenv("LIFF_REMINDER_URL", "")
+LIFF_WANT_URL = os.getenv("LIFF_WANT_URL", "")
+
 if not CHANNEL_ACCESS_TOKEN or not CHANNEL_SECRET or not BOT_PASSWORD:
     raise RuntimeError(
         "環境変数 LINE_CHANNEL_ACCESS_TOKEN / LINE_CHANNEL_SECRET / BOT_PASSWORD を設定してください。"
@@ -51,6 +59,9 @@ if not DATABASE_URL:
 
 if not CRON_SECRET:
     raise RuntimeError("環境変数 CRON_SECRET を設定してください。")
+
+if not LIFF_REMINDER_ID or not LIFF_WANT_ID or not LIFF_REMINDER_URL or not LIFF_WANT_URL:
+    raise RuntimeError("環境変数 LIFF_REMINDER_ID / LIFF_WANT_ID / LIFF_REMINDER_URL / LIFF_WANT_URL を設定してください。")
 
 app = FastAPI()
 parser = WebhookParser(CHANNEL_SECRET)
@@ -329,8 +340,8 @@ def send_push(user_id: str, messages: list):
         )
 
 
-def text_message(text: str) -> TextMessage:
-    return TextMessage(text=text)
+def text_message(text: str, quick_reply: QuickReply | None = None) -> TextMessage:
+    return TextMessage(text=text, quick_reply=quick_reply)
 
 
 def safe_date_str(y: int, m: int, d: int) -> str:
@@ -346,6 +357,22 @@ def format_single_datetime_jp(dt: datetime) -> str:
 
 def format_weekly_label(weekday: int, hhmm: str) -> str:
     return f"毎週 {JP_WEEK_FULL[weekday]} {hhmm}"
+
+
+def liff_quick_reply(menu_type: str) -> QuickReply:
+    if menu_type == "reminder":
+        items = [
+            QuickReplyItem(action=MessageAction(label="追加", text="リマインド追加")),
+            QuickReplyItem(action=URIAction(label="一覧", uri=LIFF_REMINDER_URL)),
+            QuickReplyItem(action=MessageAction(label="メニューに戻る", text="メニュー")),
+        ]
+    else:
+        items = [
+            QuickReplyItem(action=MessageAction(label="追加", text="ほしいもの追加")),
+            QuickReplyItem(action=URIAction(label="一覧", uri=LIFF_WANT_URL)),
+            QuickReplyItem(action=MessageAction(label="メニューに戻る", text="メニュー")),
+        ]
+    return QuickReply(items=items)
 
 
 def main_menu_message() -> FlexMessage:
@@ -381,58 +408,6 @@ def main_menu_message() -> FlexMessage:
     )
 
 
-def reminder_menu_message() -> FlexMessage:
-    bubble = FlexBubble(
-        body=FlexBox(
-            layout="vertical",
-            spacing="md",
-            contents=[
-                FlexText(text="リマインド", weight="bold", size="xl"),
-                FlexBox(
-                    layout="vertical",
-                    spacing="sm",
-                    contents=[
-                        full_button("追加", "リマインド追加"),
-                        full_button("一覧", "リマインド一覧"),
-                        full_button("削除", "リマインド削除"),
-                        full_button("メニューに戻る", "メニュー"),
-                    ]
-                ),
-            ]
-        )
-    )
-    return FlexMessage(
-        alt_text="リマインドメニュー",
-        contents=FlexContainer.from_json(json.dumps(bubble.to_dict()))
-    )
-
-
-def want_menu_message() -> FlexMessage:
-    bubble = FlexBubble(
-        body=FlexBox(
-            layout="vertical",
-            spacing="md",
-            contents=[
-                FlexText(text="ほしいもの", weight="bold", size="xl"),
-                FlexBox(
-                    layout="vertical",
-                    spacing="sm",
-                    contents=[
-                        full_button("追加", "ほしいもの追加"),
-                        full_button("一覧", "ほしいもの一覧"),
-                        full_button("削除", "ほしいもの削除"),
-                        full_button("メニューに戻る", "メニュー"),
-                    ]
-                ),
-            ]
-        )
-    )
-    return FlexMessage(
-        alt_text="ほしいものメニュー",
-        contents=FlexContainer.from_json(json.dumps(bubble.to_dict()))
-    )
-
-
 def menu_button(label: str, text: str) -> FlexBox:
     return FlexBox(
         layout="vertical",
@@ -446,13 +421,6 @@ def menu_button(label: str, text: str) -> FlexBox:
                 action=MessageAction(label=label, text=text)
             )
         ]
-    )
-
-
-def full_button(label: str, text: str) -> FlexButton:
-    return FlexButton(
-        style="primary",
-        action=MessageAction(label=label, text=text)
     )
 
 
@@ -499,6 +467,7 @@ def parse_relative_datetime(s: str) -> datetime | None:
         return now + timedelta(hours=hours)
 
     return None
+
 
 def parse_time_only_datetime(s: str) -> tuple[datetime, str] | None:
     hhmm = parse_time_hhmm(s)
@@ -731,248 +700,13 @@ def list_wants_text(user_id: str) -> str:
 
     lines = ["ほしいもの一覧"]
     for row in rows:
-        lines.append(f"・ID:{row['id']} / {row['content']}")
+        lines.append(f"・{row['content']}")
     return "\n".join(lines)
 
 
 def should_timeout(updated_at_iso: str) -> bool:
     updated_at = datetime.fromisoformat(updated_at_iso).astimezone(TZ)
     return now_jst() - updated_at > timedelta(minutes=10)
-
-
-def handle_text_message(user_id: str, text: str, reply_token: str):
-    state = get_state(user_id)
-
-    if not is_authorized_user(user_id):
-        locked, locked_until = is_auth_locked(user_id)
-
-        if locked:
-            send_reply(reply_token, [
-                text_message("入力を制限中だよ。しばらくしてからもう一度試してね。")
-            ])
-            return
-
-        if state["state"] != STATE_WAITING_PASSWORD:
-            set_state(user_id, STATE_WAITING_PASSWORD, None)
-            send_reply(reply_token, [
-                text_message("このBotを使うにはパスワードを入力してね。")
-            ])
-            return
-
-        if text.strip() == BOT_PASSWORD:
-            authorize_user(user_id)
-            reset_auth_attempt(user_id)
-            reset_state(user_id)
-            send_reply(reply_token, [
-                text_message("認証できたよ！使えるようになったよ。"),
-                main_menu_message()
-            ])
-            return
-
-        failed_count, locked_until = register_auth_failure(user_id)
-
-        if locked_until:
-            send_reply(reply_token, [
-                text_message("3回間違えたのでロックしたよ。しばらくしてから試してね。")
-            ])
-            return
-
-        remain = 3 - failed_count
-        send_reply(reply_token, [
-            text_message(f"パスワードが違うよ。あと {remain} 回でロックされるよ。")
-        ])
-        return
-
-    if should_timeout(state["updated_at"]) and state["state"] != STATE_NONE:
-        reset_state(user_id)
-        state = get_state(user_id)
-
-    if text == "キャンセル":
-        reset_state(user_id)
-        send_reply(reply_token, [text_message("キャンセルしたよ！"), main_menu_message()])
-        return
-
-    if text == "メニュー":
-        reset_state(user_id)
-        send_reply(reply_token, [main_menu_message()])
-        return
-
-    if text == "Coming Soon":
-        send_reply(reply_token, [text_message("ここは準備中だよ。")])
-        return
-
-    if text == "リマインド":
-        reset_state(user_id)
-        send_reply(reply_token, [reminder_menu_message()])
-        return
-
-    if text == "ほしいもの":
-        reset_state(user_id)
-        send_reply(reply_token, [want_menu_message()])
-        return
-
-    if text == "リマインド一覧":
-        send_reply(reply_token, [text_message(list_reminders_text(user_id)), reminder_menu_message()])
-        return
-
-    if text == "ほしいもの一覧":
-        send_reply(reply_token, [text_message(list_wants_text(user_id)), want_menu_message()])
-        return
-
-    if text == "リマインド削除":
-        reminder_text = list_reminders_text(user_id)
-        if reminder_text == "リマインダーはまだないよ。":
-            send_reply(reply_token, [text_message(reminder_text), reminder_menu_message()])
-            return
-        set_state(user_id, STATE_WAITING_REMINDER_DELETE, None)
-        send_reply(reply_token, [
-            text_message(reminder_text),
-            text_message("削除したいリマインダーのIDを送ってね。\nやめるときは「キャンセル」")
-        ])
-        return
-
-    if text == "ほしいもの削除":
-        want_text = list_wants_text(user_id)
-        if want_text == "ほしいものはまだないよ。":
-            send_reply(reply_token, [text_message(want_text), want_menu_message()])
-            return
-        set_state(user_id, STATE_WAITING_WANT_DELETE, None)
-        send_reply(reply_token, [
-            text_message(want_text),
-            text_message("削除したいほしいもののIDを送ってね。\nやめるときは「キャンセル」")
-        ])
-        return
-
-    if text == "リマインド追加":
-        set_state(user_id, STATE_WAITING_REMINDER_CONTENT, None)
-        send_reply(reply_token, [text_message("通知したい内容を送ってね。\n例：ランチ\n\nやめるときは「キャンセル」")])
-        return
-
-    if text == "ほしいもの追加":
-        set_state(user_id, STATE_WAITING_WANT_CONTENT, None)
-        send_reply(reply_token, [text_message("ほしいものを送ってね。\n例：イヤホン\n\nやめるときは「キャンセル」")])
-        return
-
-    if state["state"] == STATE_WAITING_REMINDER_CONTENT:
-        content = text.strip()
-        set_state(user_id, STATE_WAITING_REMINDER_DATETIME, content)
-        send_reply(reply_token, [text_message(
-            f"「{content}」だね！覚えたよ！\n"
-            "いつ教えてほしい？\n"
-            "\n"
-            "次の形式で送ってね。\n"
-            "・明日 10:00\n"
-            "・水曜日 08:00\n"
-            "・来週金曜日 15:00\n"
-            "・10時\n"
-            "・10時30分\n"
-            "・3分後\n"
-            "・YYYYMMDD HH:MM\n"
-            "・M/D HH:MM\n"
-            "\n"
-            "やめるときは「キャンセル」"
-        )])
-        return
-
-    if state["state"] == STATE_WAITING_REMINDER_DATETIME:
-        parsed = parse_datetime_input(text.strip())
-
-        if parsed and parsed.get("error") == "time_required":
-            send_reply(reply_token, [text_message(
-                "時刻もいっしょに送ってね。\n"
-                "例：\n"
-                "・明日 10:00\n"
-                "・水曜日 08:00\n"
-                "・来週金曜日 15:00\n"
-                "・YYYYMMDD HH:MM\n"
-                "・M/D HH:MM\n"
-                "やめるときは「キャンセル」"
-            )])
-            return
-
-        if not parsed:
-            send_reply(reply_token, [text_message(
-                "日時がうまく読めなかったよ。\n"
-                "\n"
-                "次の形式で送ってね。\n"
-                "・明日 10:00\n"
-                "・水曜日 08:00\n"
-                "・来週金曜日 15:00\n"
-                "・10時\n"
-                "・10時30分\n"
-                "・3分後\n"
-                "・YYYYMMDD HH:MM\n"
-                "・M/D HH:MM\n"
-                "\n"
-                "やめるときは「キャンセル」"
-            )])
-            return
-
-        content = state["temp_content"] or "無題"
-        create_reminder(user_id, content, parsed)
-        reset_state(user_id)
-
-        if parsed["kind"] == "single":
-            dt_text = format_single_datetime_jp(parsed["scheduled_at"])
-            msg = f"OK！「{content}」を {dt_text} に通知するね！"
-        else:
-            weekly_text = format_weekly_label(parsed["weekday"], parsed["time_hhmm"])
-            msg = f"OK！「{content}」を {weekly_text} に通知するね！"
-
-        send_reply(reply_token, [text_message(msg), reminder_menu_message()])
-        return
-
-    if state["state"] == STATE_WAITING_WANT_CONTENT:
-        add_want(user_id, text.strip())
-        reset_state(user_id)
-        send_reply(reply_token, [
-            text_message(f"OK！「{text.strip()}」を追加したよ！"),
-            want_menu_message()
-        ])
-        return
-
-    if state["state"] == STATE_WAITING_REMINDER_DELETE:
-        try:
-            reminder_id = int(text.strip())
-        except ValueError:
-            send_reply(reply_token, [text_message("数字のIDを送ってね。\nやめるときは「キャンセル」")])
-            return
-
-        deleted = delete_reminder_by_id(user_id, reminder_id)
-        if not deleted:
-            send_reply(reply_token, [text_message("そのIDは見つからなかったよ。もう一度送ってね。\nやめるときは「キャンセル」")])
-            return
-
-        reset_state(user_id)
-        send_reply(reply_token, [
-            text_message(f"リマインダー ID:{reminder_id} を削除したよ！"),
-            reminder_menu_message()
-        ])
-        return
-
-    if state["state"] == STATE_WAITING_WANT_DELETE:
-        try:
-            want_id = int(text.strip())
-        except ValueError:
-            send_reply(reply_token, [text_message("数字のIDを送ってね。\nやめるときは「キャンセル」")])
-            return
-
-        deleted = delete_want_by_id(user_id, want_id)
-        if not deleted:
-            send_reply(reply_token, [text_message("そのIDは見つからなかったよ。もう一度送ってね。\nやめるときは「キャンセル」")])
-            return
-
-        reset_state(user_id)
-        send_reply(reply_token, [
-            text_message(f"ほしいもの ID:{want_id} を削除したよ！"),
-            want_menu_message()
-        ])
-        return
-
-    send_reply(reply_token, [
-        text_message("「メニュー」を押すか送ってね。"),
-        main_menu_message()
-    ])
 
 
 def get_today_occurrences(row: dict[str, Any], base_now: datetime) -> tuple[date, datetime] | None:
@@ -1080,6 +814,914 @@ def send_due_notifications() -> dict[str, Any]:
     }
 
 
+def format_card_date(dt_str: str) -> dict[str, str]:
+    dt = datetime.fromisoformat(dt_str).astimezone(TZ)
+    return {
+        "date": f"{dt.month}/{dt.day}",
+        "weekday": JP_WEEK_FULL[dt.weekday()].replace("曜日", ""),
+        "time": dt.strftime("%H:%M"),
+        "iso_date": dt.date().isoformat(),
+    }
+
+
+def reminder_row_to_card(row: dict[str, Any]) -> dict[str, Any]:
+    if row["kind"] == "single":
+        fmt = format_card_date(row["scheduled_at"])
+        return {
+            "id": row["id"],
+            "kind": row["kind"],
+            "content": row["content"],
+            "date": fmt["date"],
+            "weekday": fmt["weekday"],
+            "time": fmt["time"],
+            "iso_date": fmt["iso_date"],
+        }
+
+    return {
+        "id": row["id"],
+        "kind": row["kind"],
+        "content": row["content"],
+        "date": "",
+        "weekday": JP_WEEK_FULL[row["weekday"]].replace("曜日", ""),
+        "time": row["time_hhmm"],
+        "iso_date": "",
+    }
+
+
+def wants_row_to_card(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "content": row["content"],
+    }
+
+
+def get_user_id_from_header(x_user_id: str | None) -> str:
+    if not x_user_id:
+        raise HTTPException(status_code=400, detail="x-user-id がありません。")
+    if not is_authorized_user(x_user_id):
+        raise HTTPException(status_code=403, detail="unauthorized user")
+    return x_user_id
+
+
+def build_reminders_liff_html() -> str:
+    return f"""
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>リマインド一覧</title>
+  <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+  <style>
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+      background: #f5f6f8;
+      color: #222;
+    }}
+    .wrap {{ padding: 14px 14px 24px; }}
+    .topbar {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }}
+    .title {{
+      font-size: 20px;
+      font-weight: 700;
+    }}
+    .close-btn {{
+      width: 36px;
+      height: 36px;
+      border: none;
+      border-radius: 18px;
+      background: #e9ecef;
+      font-size: 20px;
+      cursor: pointer;
+    }}
+    .tabs {{
+      display: flex;
+      gap: 8px;
+      margin-bottom: 14px;
+    }}
+    .tab {{
+      flex: 1;
+      border: none;
+      border-radius: 12px;
+      padding: 10px 0;
+      background: #e9ecef;
+      font-weight: 700;
+      cursor: pointer;
+    }}
+    .tab.active {{
+      background: #12b85a;
+      color: #fff;
+    }}
+    .panel {{ display: none; }}
+    .panel.active {{ display: block; }}
+    .card {{
+      position: relative;
+      background: #fff;
+      border-radius: 16px;
+      padding: 14px 44px 14px 14px;
+      margin-bottom: 12px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.06);
+    }}
+    .card-top {{
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      font-size: 14px;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }}
+    .card-content {{
+      font-size: 16px;
+      line-height: 1.4;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }}
+    .card-x {{
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      width: 28px;
+      height: 28px;
+      border: none;
+      border-radius: 14px;
+      background: #f1f3f5;
+      font-size: 16px;
+      cursor: pointer;
+    }}
+    .empty {{
+      padding: 18px;
+      text-align: center;
+      color: #666;
+    }}
+    .calendar-box {{
+      background: #fff;
+      border-radius: 16px;
+      padding: 12px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.06);
+      margin-bottom: 12px;
+    }}
+    .calendar-head {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }}
+    .cal-nav {{
+      border: none;
+      background: #e9ecef;
+      border-radius: 10px;
+      width: 34px;
+      height: 34px;
+      cursor: pointer;
+      font-size: 16px;
+    }}
+    .month-label {{
+      font-weight: 700;
+      font-size: 16px;
+    }}
+    .week-row, .grid {{
+      display: grid;
+      grid-template-columns: repeat(7, 1fr);
+      gap: 6px;
+    }}
+    .week-cell {{
+      text-align: center;
+      font-size: 12px;
+      color: #666;
+      padding: 4px 0;
+    }}
+    .day-cell {{
+      position: relative;
+      min-height: 48px;
+      border: none;
+      border-radius: 12px;
+      background: #f6f7f9;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 600;
+    }}
+    .day-cell.selected {{
+      background: #12b85a;
+      color: #fff;
+    }}
+    .day-cell.other {{
+      opacity: 0.35;
+    }}
+    .dot {{
+      position: absolute;
+      left: 50%;
+      bottom: 6px;
+      width: 6px;
+      height: 6px;
+      margin-left: -3px;
+      border-radius: 3px;
+      background: #111;
+    }}
+    .day-cell.selected .dot {{ background: #fff; }}
+    .modal-backdrop {{
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.35);
+      display: none;
+      align-items: flex-end;
+      justify-content: center;
+      padding: 14px;
+    }}
+    .modal-backdrop.show {{ display: flex; }}
+    .modal {{
+      width: 100%;
+      max-width: 420px;
+      background: #fff;
+      border-radius: 18px;
+      padding: 16px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.18);
+    }}
+    .modal-text {{
+      font-size: 16px;
+      line-height: 1.5;
+      margin-bottom: 14px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }}
+    .modal-actions {{
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+    }}
+    .btn {{
+      border: none;
+      border-radius: 12px;
+      padding: 10px 16px;
+      font-weight: 700;
+      cursor: pointer;
+    }}
+    .btn-no {{ background: #e9ecef; }}
+    .btn-yes {{ background: #12b85a; color: #fff; }}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="topbar">
+      <div class="title">リマインド一覧</div>
+      <button class="close-btn" id="closeBtn">×</button>
+    </div>
+
+    <div class="tabs">
+      <button class="tab active" data-tab="list">一覧</button>
+      <button class="tab" data-tab="repeat">繰り返し</button>
+      <button class="tab" data-tab="calendar">カレンダー</button>
+    </div>
+
+    <div class="panel active" id="panel-list">
+      <div id="singleList"></div>
+    </div>
+
+    <div class="panel" id="panel-repeat">
+      <div id="repeatList"></div>
+    </div>
+
+    <div class="panel" id="panel-calendar">
+      <div class="calendar-box">
+        <div class="calendar-head">
+          <button class="cal-nav" id="prevMonth">‹</button>
+          <div class="month-label" id="monthLabel"></div>
+          <button class="cal-nav" id="nextMonth">›</button>
+        </div>
+        <div class="week-row">
+          <div class="week-cell">日</div>
+          <div class="week-cell">月</div>
+          <div class="week-cell">火</div>
+          <div class="week-cell">水</div>
+          <div class="week-cell">木</div>
+          <div class="week-cell">金</div>
+          <div class="week-cell">土</div>
+        </div>
+        <div class="grid" id="calendarGrid"></div>
+      </div>
+      <div id="calendarItems"></div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="deleteModal">
+    <div class="modal">
+      <div class="modal-text" id="deleteText"></div>
+      <div class="modal-actions">
+        <button class="btn btn-no" id="deleteNo">いいえ</button>
+        <button class="btn btn-yes" id="deleteYes">はい</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+const LIFF_ID = "{LIFF_REMINDER_ID}";
+let userId = "";
+let deleteTargetId = null;
+let deleteTargetContent = "";
+let currentCalendarDate = new Date();
+let selectedDate = null;
+
+const singleList = document.getElementById("singleList");
+const repeatList = document.getElementById("repeatList");
+const calendarItems = document.getElementById("calendarItems");
+const monthLabel = document.getElementById("monthLabel");
+const calendarGrid = document.getElementById("calendarGrid");
+const deleteModal = document.getElementById("deleteModal");
+const deleteText = document.getElementById("deleteText");
+
+document.getElementById("closeBtn").addEventListener("click", () => {{
+  if (window.liff) liff.closeWindow();
+}});
+
+document.querySelectorAll(".tab").forEach(btn => {{
+  btn.addEventListener("click", () => {{
+    document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
+    document.querySelectorAll(".panel").forEach(x => x.classList.remove("active"));
+    btn.classList.add("active");
+    document.getElementById("panel-" + btn.dataset.tab).classList.add("active");
+  }});
+}});
+
+document.getElementById("deleteNo").addEventListener("click", () => {{
+  deleteModal.classList.remove("show");
+  deleteTargetId = null;
+}});
+
+document.getElementById("deleteYes").addEventListener("click", async () => {{
+  if (!deleteTargetId) return;
+  await fetch(`/api/reminders/${{deleteTargetId}}`, {{
+    method: "DELETE",
+    headers: {{
+      "x-user-id": userId
+    }}
+  }});
+  deleteModal.classList.remove("show");
+  deleteTargetId = null;
+  await loadAllReminderViews();
+}});
+
+document.getElementById("prevMonth").addEventListener("click", async () => {{
+  currentCalendarDate = new Date(currentCalendarDate.getFullYear(), currentCalendarDate.getMonth() - 1, 1);
+  await loadCalendar();
+}});
+
+document.getElementById("nextMonth").addEventListener("click", async () => {{
+  currentCalendarDate = new Date(currentCalendarDate.getFullYear(), currentCalendarDate.getMonth() + 1, 1);
+  await loadCalendar();
+}});
+
+function openDeleteModal(id, content) {{
+  deleteTargetId = id;
+  deleteTargetContent = content;
+  deleteText.textContent = `「${{content}}」を削除しますか？`;
+  deleteModal.classList.add("show");
+}}
+
+function renderReminderCards(target, items, emptyText) {{
+  if (!items.length) {{
+    target.innerHTML = `<div class="empty">${{emptyText}}</div>`;
+    return;
+  }}
+
+  target.innerHTML = items.map(item => `
+    <div class="card">
+      <button class="card-x" onclick='openDeleteModal(${{item.id}}, ${{JSON.stringify(item.content)}})'>×</button>
+      <div class="card-top">
+        <span>${{item.date}}</span>
+        <span>${{item.weekday}}</span>
+        <span>${{item.time}}</span>
+      </div>
+      <div class="card-content">${{escapeHtml(item.content)}}</div>
+    </div>
+  `).join("");
+}}
+
+function escapeHtml(text) {{
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}}
+
+async function apiGet(url) {{
+  const res = await fetch(url, {{
+    headers: {{
+      "x-user-id": userId
+    }}
+  }});
+  if (!res.ok) throw new Error(await res.text());
+  return await res.json();
+}}
+
+async function loadSingleList() {{
+  const data = await apiGet("/api/reminders/one-time");
+  renderReminderCards(singleList, data.items, "単発予定はまだないよ。");
+}}
+
+async function loadRepeatList() {{
+  const data = await apiGet("/api/reminders/repeat");
+  renderReminderCards(repeatList, data.items, "繰り返し予定はまだないよ。");
+}}
+
+async function loadCalendar() {{
+  const year = currentCalendarDate.getFullYear();
+  const month = currentCalendarDate.getMonth() + 1;
+  const data = await apiGet(`/api/reminders/calendar?year=${{year}}&month=${{month}}`);
+
+  monthLabel.textContent = `${{year}}/${{String(month).padStart(2, "0")}}`;
+  renderCalendarGrid(data.days, year, month);
+
+  if (!selectedDate) {{
+    selectedDate = data.days.find(x => x.has_items)?.date || `${{year}}-${{String(month).padStart(2, "0")}}-01`;
+  }}
+
+  await loadCalendarItems(selectedDate);
+}}
+
+function renderCalendarGrid(days, year, month) {{
+  calendarGrid.innerHTML = "";
+
+  const firstDay = new Date(year, month - 1, 1);
+  const startWeekday = firstDay.getDay();
+  const lastDate = new Date(year, month, 0).getDate();
+
+  const prevLastDate = new Date(year, month - 1, 0).getDate();
+
+  let cells = [];
+
+  for (let i = 0; i < startWeekday; i++) {{
+    const d = prevLastDate - startWeekday + i + 1;
+    cells.push({{
+      day: d,
+      date: "",
+      has_items: false,
+      other: true
+    }});
+  }}
+
+  for (let d = 1; d <= lastDate; d++) {{
+    const dateStr = `${{year}}-${{String(month).padStart(2, "0")}}-${{String(d).padStart(2, "0")}}`;
+    const match = days.find(x => x.date === dateStr);
+    cells.push({{
+      day: d,
+      date: dateStr,
+      has_items: !!match?.has_items,
+      other: false
+    }});
+  }}
+
+  while (cells.length % 7 !== 0) {{
+    cells.push({{
+      day: cells.length,
+      date: "",
+      has_items: false,
+      other: true
+    }});
+  }}
+
+  cells.forEach(cell => {{
+    const btn = document.createElement("button");
+    btn.className = "day-cell";
+    if (cell.other) btn.classList.add("other");
+    if (cell.date && cell.date === selectedDate) btn.classList.add("selected");
+    btn.innerHTML = `<span>${{cell.day}}</span>${{cell.has_items ? '<span class="dot"></span>' : ''}}`;
+    if (cell.date) {{
+      btn.addEventListener("click", async () => {{
+        selectedDate = cell.date;
+        renderCalendarGrid(days, year, month);
+        await loadCalendarItems(cell.date);
+      }});
+    }}
+    calendarGrid.appendChild(btn);
+  }});
+}}
+
+async function loadCalendarItems(dateStr) {{
+  const data = await apiGet(`/api/reminders/by-date?date=${{dateStr}}`);
+  renderReminderCards(calendarItems, data.items, "この日の予定はないよ。");
+}}
+
+async function loadAllReminderViews() {{
+  await loadSingleList();
+  await loadRepeatList();
+  await loadCalendar();
+}}
+
+async function boot() {{
+  await liff.init({{ liffId: LIFF_ID }});
+  if (!liff.isLoggedIn()) {{
+    liff.login();
+    return;
+  }}
+  const profile = await liff.getProfile();
+  userId = profile.userId;
+  await loadAllReminderViews();
+}}
+
+boot();
+</script>
+</body>
+</html>
+"""
+
+
+def build_wants_liff_html() -> str:
+    return f"""
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>ほしいもの一覧</title>
+  <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+  <style>
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+      background: #f5f6f8;
+      color: #222;
+    }}
+    .wrap {{ padding: 14px 14px 24px; }}
+    .topbar {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }}
+    .title {{
+      font-size: 20px;
+      font-weight: 700;
+    }}
+    .close-btn {{
+      width: 36px;
+      height: 36px;
+      border: none;
+      border-radius: 18px;
+      background: #e9ecef;
+      font-size: 20px;
+      cursor: pointer;
+    }}
+    .card {{
+      position: relative;
+      background: #fff;
+      border-radius: 16px;
+      padding: 14px 44px 14px 14px;
+      margin-bottom: 12px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.06);
+    }}
+    .card-content {{
+      font-size: 16px;
+      line-height: 1.4;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }}
+    .card-x {{
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      width: 28px;
+      height: 28px;
+      border: none;
+      border-radius: 14px;
+      background: #f1f3f5;
+      font-size: 16px;
+      cursor: pointer;
+    }}
+    .empty {{
+      padding: 18px;
+      text-align: center;
+      color: #666;
+    }}
+    .modal-backdrop {{
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.35);
+      display: none;
+      align-items: flex-end;
+      justify-content: center;
+      padding: 14px;
+    }}
+    .modal-backdrop.show {{ display: flex; }}
+    .modal {{
+      width: 100%;
+      max-width: 420px;
+      background: #fff;
+      border-radius: 18px;
+      padding: 16px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.18);
+    }}
+    .modal-text {{
+      font-size: 16px;
+      line-height: 1.5;
+      margin-bottom: 14px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }}
+    .modal-actions {{
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+    }}
+    .btn {{
+      border: none;
+      border-radius: 12px;
+      padding: 10px 16px;
+      font-weight: 700;
+      cursor: pointer;
+    }}
+    .btn-no {{ background: #e9ecef; }}
+    .btn-yes {{ background: #12b85a; color: #fff; }}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="topbar">
+      <div class="title">ほしいもの一覧</div>
+      <button class="close-btn" id="closeBtn">×</button>
+    </div>
+    <div id="wantList"></div>
+  </div>
+
+  <div class="modal-backdrop" id="deleteModal">
+    <div class="modal">
+      <div class="modal-text" id="deleteText"></div>
+      <div class="modal-actions">
+        <button class="btn btn-no" id="deleteNo">いいえ</button>
+        <button class="btn btn-yes" id="deleteYes">はい</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+const LIFF_ID = "{LIFF_WANT_ID}";
+let userId = "";
+let deleteTargetId = null;
+
+const wantList = document.getElementById("wantList");
+const deleteModal = document.getElementById("deleteModal");
+const deleteText = document.getElementById("deleteText");
+
+document.getElementById("closeBtn").addEventListener("click", () => {{
+  if (window.liff) liff.closeWindow();
+}});
+
+document.getElementById("deleteNo").addEventListener("click", () => {{
+  deleteModal.classList.remove("show");
+  deleteTargetId = null;
+}});
+
+document.getElementById("deleteYes").addEventListener("click", async () => {{
+  if (!deleteTargetId) return;
+  await fetch(`/api/wants/${{deleteTargetId}}`, {{
+    method: "DELETE",
+    headers: {{
+      "x-user-id": userId
+    }}
+  }});
+  deleteModal.classList.remove("show");
+  deleteTargetId = null;
+  await loadWants();
+}});
+
+function openDeleteModal(id, content) {{
+  deleteTargetId = id;
+  deleteText.textContent = `「${{content}}」を削除しますか？`;
+  deleteModal.classList.add("show");
+}}
+
+function escapeHtml(text) {{
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}}
+
+async function apiGet(url) {{
+  const res = await fetch(url, {{
+    headers: {{
+      "x-user-id": userId
+    }}
+  }});
+  if (!res.ok) throw new Error(await res.text());
+  return await res.json();
+}}
+
+async function loadWants() {{
+  const data = await apiGet("/api/wants");
+  if (!data.items.length) {{
+    wantList.innerHTML = '<div class="empty">ほしいものはまだないよ。</div>';
+    return;
+  }}
+
+  wantList.innerHTML = data.items.map(item => `
+    <div class="card">
+      <button class="card-x" onclick='openDeleteModal(${{item.id}}, ${{JSON.stringify(item.content)}})'>×</button>
+      <div class="card-content">${{escapeHtml(item.content)}}</div>
+    </div>
+  `).join("");
+}}
+
+async function boot() {{
+  await liff.init({{ liffId: LIFF_ID }});
+  if (!liff.isLoggedIn()) {{
+    liff.login();
+    return;
+  }}
+  const profile = await liff.getProfile();
+  userId = profile.userId;
+  await loadWants();
+}}
+
+boot();
+</script>
+</body>
+</html>
+"""
+
+
+def handle_text_message(user_id: str, text: str, reply_token: str):
+    state = get_state(user_id)
+
+    if not is_authorized_user(user_id):
+        locked, _locked_until = is_auth_locked(user_id)
+
+        if locked:
+            send_reply(reply_token, [
+                text_message("入力を制限中だよ。しばらくしてからもう一度試してね。")
+            ])
+            return
+
+        if state["state"] != STATE_WAITING_PASSWORD:
+            set_state(user_id, STATE_WAITING_PASSWORD, None)
+            send_reply(reply_token, [
+                text_message("このBotを使うにはパスワードを入力してね。")
+            ])
+            return
+
+        if text.strip() == BOT_PASSWORD:
+            authorize_user(user_id)
+            reset_auth_attempt(user_id)
+            reset_state(user_id)
+            send_reply(reply_token, [
+                text_message("認証できたよ！使えるようになったよ。"),
+                main_menu_message()
+            ])
+            return
+
+        failed_count, locked_until = register_auth_failure(user_id)
+
+        if locked_until:
+            send_reply(reply_token, [
+                text_message("3回間違えたのでロックしたよ。しばらくしてから試してね。")
+            ])
+            return
+
+        remain = 3 - failed_count
+        send_reply(reply_token, [
+            text_message(f"パスワードが違うよ。あと {remain} 回でロックされるよ。")
+        ])
+        return
+
+    if should_timeout(state["updated_at"]) and state["state"] != STATE_NONE:
+        reset_state(user_id)
+        state = get_state(user_id)
+
+    if text == "キャンセル":
+        reset_state(user_id)
+        send_reply(reply_token, [text_message("キャンセルしたよ！"), main_menu_message()])
+        return
+
+    if text == "メニュー":
+        reset_state(user_id)
+        send_reply(reply_token, [main_menu_message()])
+        return
+
+    if text == "Coming Soon":
+        send_reply(reply_token, [text_message("ここは準備中だよ。")])
+        return
+
+    if text == "リマインド":
+        reset_state(user_id)
+        send_reply(reply_token, [text_message("リマインド", quick_reply=liff_quick_reply("reminder"))])
+        return
+
+    if text == "ほしいもの":
+        reset_state(user_id)
+        send_reply(reply_token, [text_message("ほしいもの", quick_reply=liff_quick_reply("want"))])
+        return
+
+    if text == "リマインド一覧":
+        send_reply(reply_token, [text_message("一覧は下の「一覧」から開いてね。", quick_reply=liff_quick_reply("reminder"))])
+        return
+
+    if text == "ほしいもの一覧":
+        send_reply(reply_token, [text_message("一覧は下の「一覧」から開いてね。", quick_reply=liff_quick_reply("want"))])
+        return
+
+    if text == "リマインド追加":
+        set_state(user_id, STATE_WAITING_REMINDER_CONTENT, None)
+        send_reply(reply_token, [text_message("通知したい内容を送ってね。\n例：ランチ\n\nやめるときは「キャンセル」")])
+        return
+
+    if text == "ほしいもの追加":
+        set_state(user_id, STATE_WAITING_WANT_CONTENT, None)
+        send_reply(reply_token, [text_message("ほしいものを送ってね。\n例：イヤホン\n\nやめるときは「キャンセル」")])
+        return
+
+    if state["state"] == STATE_WAITING_REMINDER_CONTENT:
+        content = text.strip()
+        set_state(user_id, STATE_WAITING_REMINDER_DATETIME, content)
+        send_reply(reply_token, [text_message(
+            f"「{content}」だね！覚えたよ！\n"
+            "いつ教えてほしい？\n"
+            "\n"
+            "次の形式で送ってね。\n"
+            "・明日 10:00\n"
+            "・水曜日 08:00\n"
+            "・来週金曜日 15:00\n"
+            "・10時\n"
+            "・10時30分\n"
+            "・3分後\n"
+            "・YYYYMMDD HH:MM\n"
+            "・M/D HH:MM\n"
+            "\n"
+            "やめるときは「キャンセル」"
+        )])
+        return
+
+    if state["state"] == STATE_WAITING_REMINDER_DATETIME:
+        parsed = parse_datetime_input(text.strip())
+
+        if parsed and parsed.get("error") == "time_required":
+            send_reply(reply_token, [text_message(
+                "時刻もいっしょに送ってね。\n"
+                "例：\n"
+                "・明日 10:00\n"
+                "・水曜日 08:00\n"
+                "・来週金曜日 15:00\n"
+                "・YYYYMMDD HH:MM\n"
+                "・M/D HH:MM\n"
+                "やめるときは「キャンセル」"
+            )])
+            return
+
+        if not parsed:
+            send_reply(reply_token, [text_message(
+                "日時がうまく読めなかったよ。\n"
+                "\n"
+                "次の形式で送ってね。\n"
+                "・明日 10:00\n"
+                "・水曜日 08:00\n"
+                "・来週金曜日 15:00\n"
+                "・10時\n"
+                "・10時30分\n"
+                "・3分後\n"
+                "・YYYYMMDD HH:MM\n"
+                "・M/D HH:MM\n"
+                "\n"
+                "やめるときは「キャンセル」"
+            )])
+            return
+
+        content = state["temp_content"] or "無題"
+        create_reminder(user_id, content, parsed)
+        reset_state(user_id)
+
+        if parsed["kind"] == "single":
+            dt_text = format_single_datetime_jp(parsed["scheduled_at"])
+            msg = f"OK！「{content}」を {dt_text} に通知するね！"
+        else:
+            weekly_text = format_weekly_label(parsed["weekday"], parsed["time_hhmm"])
+            msg = f"OK！「{content}」を {weekly_text} に通知するね！"
+
+        send_reply(reply_token, [text_message(msg), text_message("リマインド", quick_reply=liff_quick_reply("reminder"))])
+        return
+
+    if state["state"] == STATE_WAITING_WANT_CONTENT:
+        add_want(user_id, text.strip())
+        reset_state(user_id)
+        send_reply(reply_token, [
+            text_message(f"OK！「{text.strip()}」を追加したよ！"),
+            text_message("ほしいもの", quick_reply=liff_quick_reply("want"))
+        ])
+        return
+
+    send_reply(reply_token, [
+        text_message("「メニュー」を押すか送ってね。"),
+        main_menu_message()
+    ])
+
+
 @app.on_event("startup")
 def startup():
     init_db()
@@ -1095,11 +1737,141 @@ def healthcheck():
     return {"ok": True}
 
 
+@app.get("/liff/reminders", response_class=HTMLResponse)
+def liff_reminders():
+    return HTMLResponse(build_reminders_liff_html())
+
+
+@app.get("/liff/wants", response_class=HTMLResponse)
+def liff_wants():
+    return HTMLResponse(build_wants_liff_html())
+
+
+@app.get("/api/reminders/one-time")
+def api_reminders_one_time(x_user_id: str | None = Header(default=None)):
+    user_id = get_user_id_from_header(x_user_id)
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, content, kind, scheduled_at, weekday, time_hhmm
+            FROM reminders
+            WHERE user_id = %s AND kind = 'single'
+            ORDER BY CAST(scheduled_at AS timestamptz) ASC
+            """,
+            (user_id,)
+        ).fetchall()
+    return {"items": [reminder_row_to_card(x) for x in rows]}
+
+
+@app.get("/api/reminders/repeat")
+def api_reminders_repeat(x_user_id: str | None = Header(default=None)):
+    user_id = get_user_id_from_header(x_user_id)
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, content, kind, scheduled_at, weekday, time_hhmm
+            FROM reminders
+            WHERE user_id = %s AND kind <> 'single'
+            ORDER BY created_at ASC
+            """,
+            (user_id,)
+        ).fetchall()
+    return {"items": [reminder_row_to_card(x) for x in rows]}
+
+
+@app.get("/api/reminders/calendar")
+def api_reminders_calendar(year: int, month: int, x_user_id: str | None = Header(default=None)):
+    user_id = get_user_id_from_header(x_user_id)
+    start_date = date(year, month, 1)
+    if month == 12:
+        next_date = date(year + 1, 1, 1)
+    else:
+        next_date = date(year, month + 1, 1)
+
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT scheduled_at
+            FROM reminders
+            WHERE user_id = %s
+              AND kind = 'single'
+              AND CAST(scheduled_at AS timestamptz) >= CAST(%s AS timestamptz)
+              AND CAST(scheduled_at AS timestamptz) < CAST(%s AS timestamptz)
+            """,
+            (
+                user_id,
+                datetime.combine(start_date, time(0, 0), tzinfo=TZ).isoformat(),
+                datetime.combine(next_date, time(0, 0), tzinfo=TZ).isoformat(),
+            )
+        ).fetchall()
+
+    day_map = {}
+    for row in rows:
+        d = datetime.fromisoformat(row["scheduled_at"]).astimezone(TZ).date().isoformat()
+        day_map[d] = True
+
+    return {
+        "days": [{"date": k, "has_items": True} for k in sorted(day_map.keys())]
+    }
+
+
+@app.get("/api/reminders/by-date")
+def api_reminders_by_date(date: str, x_user_id: str | None = Header(default=None)):
+    user_id = get_user_id_from_header(x_user_id)
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, content, kind, scheduled_at, weekday, time_hhmm
+            FROM reminders
+            WHERE user_id = %s
+              AND kind = 'single'
+              AND CAST(scheduled_at AS timestamptz) >= CAST(%s AS timestamptz)
+              AND CAST(scheduled_at AS timestamptz) < CAST(%s AS timestamptz)
+            ORDER BY CAST(scheduled_at AS timestamptz) ASC
+            """,
+            (
+                user_id,
+                datetime.fromisoformat(f"{date}T00:00:00+09:00").isoformat(),
+                datetime.fromisoformat(f"{date}T23:59:59+09:00").isoformat(),
+            )
+        ).fetchall()
+    return {"items": [reminder_row_to_card(x) for x in rows]}
+
+
+@app.delete("/api/reminders/{reminder_id}")
+def api_delete_reminder(reminder_id: int, x_user_id: str | None = Header(default=None)):
+    user_id = get_user_id_from_header(x_user_id)
+    ok = delete_reminder_by_id(user_id, reminder_id)
+    return {"ok": ok}
+
+
+@app.get("/api/wants")
+def api_wants(x_user_id: str | None = Header(default=None)):
+    user_id = get_user_id_from_header(x_user_id)
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, content
+            FROM wants
+            WHERE user_id = %s
+            ORDER BY created_at DESC
+            """,
+            (user_id,)
+        ).fetchall()
+    return {"items": [wants_row_to_card(x) for x in rows]}
+
+
+@app.delete("/api/wants/{want_id}")
+def api_delete_want(want_id: int, x_user_id: str | None = Header(default=None)):
+    user_id = get_user_id_from_header(x_user_id)
+    ok = delete_want_by_id(user_id, want_id)
+    return {"ok": ok}
+
+
 @app.post("/jobs/send-due-notifications")
 async def run_send_due_notifications(x_cron_secret: str = Header(None)):
     if x_cron_secret != CRON_SECRET:
         raise HTTPException(status_code=401, detail="unauthorized")
-
     result = send_due_notifications()
     return JSONResponse(result)
 
