@@ -369,6 +369,12 @@ def liff_quick_reply(menu_type: str) -> QuickReply:
         ]
     return QuickReply(items=items)
 
+def cancel_quick_reply() -> QuickReply:
+    return QuickReply(
+        items=[
+            QuickReplyItem(action=MessageAction(label="キャンセル", text="キャンセル"))
+        ]
+    )
 
 def safe_date_str(y: int, m: int, d: int) -> str:
     zw = "\u200b"
@@ -1708,12 +1714,22 @@ def handle_text_message(user_id: str, text: str, reply_token: str):
 
     if text == "リマインド追加":
         set_state(user_id, STATE_WAITING_REMINDER_CONTENT, None)
-        send_reply(reply_token, [text_message("通知したい内容を送ってね。\n例：ランチ\n\nやめるときは「キャンセル」")])
+        send_reply(reply_token, [
+            text_message(
+                "通知したい内容を送ってね。\n例：ランチ",
+                quick_reply=cancel_quick_reply()
+            )
+        ])
         return
 
     if text == "ほしいもの追加":
         set_state(user_id, STATE_WAITING_WANT_CONTENT, None)
-        send_reply(reply_token, [text_message("ほしいものを送ってね。\n例：イヤホン\n\nやめるときは「キャンセル」")])
+        send_reply(reply_token, [
+            text_message(
+                "ほしいものを送ってね。\n例：イヤホン",
+                quick_reply=cancel_quick_reply()
+            )
+        ])
         return
 
     if state["state"] == STATE_WAITING_REMINDER_CONTENT:
@@ -1731,9 +1747,8 @@ def handle_text_message(user_id: str, text: str, reply_token: str):
             "・10時30分\n"
             "・3分後\n"
             "・YYYYMMDD HH:MM\n"
-            "・M/D HH:MM\n"
-            "\n"
-            "やめるときは「キャンセル」"
+            "・M/D HH:MM",
+            quick_reply=cancel_quick_reply()
         )])
         return
 
@@ -1748,8 +1763,8 @@ def handle_text_message(user_id: str, text: str, reply_token: str):
                 "・水曜日 08:00\n"
                 "・来週金曜日 15:00\n"
                 "・YYYYMMDD HH:MM\n"
-                "・M/D HH:MM\n"
-                "やめるときは「キャンセル」"
+                "・M/D HH:MM",
+                quick_reply=cancel_quick_reply()
             )])
             return
 
@@ -1765,9 +1780,8 @@ def handle_text_message(user_id: str, text: str, reply_token: str):
                 "・10時30分\n"
                 "・3分後\n"
                 "・YYYYMMDD HH:MM\n"
-                "・M/D HH:MM\n"
-                "\n"
-                "やめるときは「キャンセル」"
+                "・M/D HH:MM",
+                quick_reply=cancel_quick_reply()
             )])
             return
 
