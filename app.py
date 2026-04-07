@@ -2164,6 +2164,14 @@ def handle_text_message(user_id: str, text: str, reply_token: str):
         reset_state(user_id)
         send_reply(reply_token, [main_menu_message()])
         return
+    
+    if text == "Coming Soon":
+        reset_state(user_id)
+        send_reply(reply_token, [
+            text_message("ここは準備中だよ。"),
+            main_menu_message()
+        ])
+        return
 
     if text == "保存復元":
         reset_state(user_id)
