@@ -387,6 +387,16 @@ def cancel_quick_reply() -> QuickReply:
         ]
     )
 
+
+def save_restore_quick_reply() -> QuickReply:
+    return QuickReply(
+        items=[
+            QuickReplyItem(action=MessageAction(label="保存", text="保存")),
+            QuickReplyItem(action=MessageAction(label="復元", text="復元")),
+            QuickReplyItem(action=MessageAction(label="メニューに戻る", text="メニュー")),
+        ]
+    )
+
 def safe_date_str(y: int, m: int, d: int) -> str:
     zw = "\u200b"
     return f"{y}-{zw}{m:02d}-{zw}{d:02d}"
@@ -422,8 +432,8 @@ def main_menu_message() -> FlexMessage:
                     layout="horizontal",
                     spacing="sm",
                     contents=[
-                        menu_button("保存", "保存"),
-                        menu_button("バックアップ", "バックアップ"),
+                        menu_button("Coming Soon", "Coming Soon"),
+                        menu_button("保存・復元", "保存復元"),
                     ]
                 ),
             ]
@@ -2155,6 +2165,13 @@ def handle_text_message(user_id: str, text: str, reply_token: str):
         send_reply(reply_token, [main_menu_message()])
         return
 
+    if text == "保存復元":
+        reset_state(user_id)
+        send_reply(reply_token, [
+            text_message("どっちにする？", quick_reply=save_restore_quick_reply())
+        ])
+        return
+
     if text == "保存":
         reset_state(user_id)
         status = save_backup(user_id)
@@ -2170,11 +2187,12 @@ def handle_text_message(user_id: str, text: str, reply_token: str):
             ])
         return
 
-    if text == "バックアップ":
+    if text == "復元":
         reset_state(user_id)
         send_reply(reply_token, [
-            text_message("バックアップはこちら", quick_reply=QuickReply(items=[
-                QuickReplyItem(action=URIAction(label="開く", uri=LIFF_BACKUP_URL))
+            text_message("バックアップ一覧を開くよ", quick_reply=QuickReply(items=[
+                QuickReplyItem(action=URIAction(label="開く", uri=LIFF_BACKUP_URL)),
+                QuickReplyItem(action=MessageAction(label="メニューに戻る", text="メニュー")),
             ]))
         ])
         return
