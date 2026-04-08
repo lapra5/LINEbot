@@ -416,15 +416,13 @@ def main_menu_message() -> FlexMessage:
     bubble = FlexBubble(
         body=FlexBox(
             layout="vertical",
-            spacing="lg",
-            padding_all="20px",
+            spacing="md",
             contents=[
                 FlexText(text="メニュー", weight="bold", size="xl"),
-                FlexSeparator(margin="md"),
+                FlexSeparator(),
                 FlexBox(
                     layout="horizontal",
-                    spacing="lg",
-                    margin="lg",
+                    spacing="sm",
                     contents=[
                         menu_button("リマインド", "リマインド"),
                         menu_button("ほしいもの", "ほしいもの"),
@@ -432,11 +430,10 @@ def main_menu_message() -> FlexMessage:
                 ),
                 FlexBox(
                     layout="horizontal",
-                    spacing="lg",
-                    margin="md",
+                    spacing="sm",
                     contents=[
-                        menu_button("Coming Soon", "Coming Soon", primary=False),
-                        menu_button("保存/復元", "保存・復元", uri=LIFF_BACKUP_URL),
+                        menu_button("Coming Soon", "Coming Soon"),
+                        menu_button("保存・復元", "保存復元"),
                     ]
                 ),
             ]
@@ -448,29 +445,22 @@ def main_menu_message() -> FlexMessage:
     )
 
 
-def menu_button(label: str, text: str, primary: bool = True, uri: str | None = None) -> FlexBox:
-    action = URIAction(label=label, uri=uri) if uri else MessageAction(label=label, text=text)
-
+def menu_button(label: str, text: str) -> FlexBox:
     return FlexBox(
         layout="vertical",
         flex=1,
-        height="72px",
-        justify_content="center",
-        align_items="center",
-        background_color="#1EC94C" if primary else "#D9DDE3",
-        corner_radius="14px",
-        action=action,
+        padding_all="10px",
+        background_color="#F5F5F5",
+        corner_radius="md",
         contents=[
-            FlexText(
-                text=label,
-                color="#FFFFFF" if primary else "#222222",
-                weight="bold",
-                size="md",
-                align="center",
-                wrap=True
+            FlexButton(
+                style="primary" if "Coming Soon" not in label else "secondary",
+                action=MessageAction(label=label, text=text)
             )
         ]
     )
+
+
 def normalize_digits(text: str) -> str:
     return text.translate(str.maketrans("０１２３４５６７８９：", "0123456789:"))
 
@@ -909,10 +899,13 @@ def send_due_notifications() -> dict[str, Any]:
     sent_1h = 0
     sent_10m = 0
     sent_exact = 0
+    sent_today_digest = 0
     deleted_single = 0
 
     with get_conn() as conn:
         rows = conn.execute("SELECT * FROM reminders").fetchall()
+
+        today_items_by_user: dict[str, list[tuple[int, datetime, str]]] = {}
 
         for row in rows:
             occurrence = get_today_occurrences(row, current)
@@ -923,11 +916,9 @@ def send_due_notifications() -> dict[str, Any]:
             one_hour_before = event_dt - timedelta(hours=1)
             ten_min_before = event_dt - timedelta(minutes=10)
 
-            if row["last_day_notice_date"] != today_str and current.hour == 0 and current.minute == 0:
-                send_push(row["user_id"], [text_message(f"今日の予定の一つだよ。\n{event_dt.strftime('%H:%M')} {row['content']}")])
-                conn.execute(
-                    "UPDATE reminders SET last_day_notice_date = %s WHERE id = %s",
-                    (today_str, row["id"])
+            if row["last_day_notice_date"] != today_str:
+                today_items_by_user.setdefault(row["user_id"], []).append(
+                    (row["id"], event_dt, row["content"])
                 )
 
             if row["last_1h_notice_date"] != today_str:
@@ -957,6 +948,24 @@ def send_due_notifications() -> dict[str, Any]:
                     )
                     sent_exact += 1
 
+        if current.hour == 0 and current.minute == 0:
+            for user_id, items in today_items_by_user.items():
+                items.sort(key=lambda x: x[1])
+
+                lines = ["今日の予定だよ。"]
+                for _, event_dt, content in items:
+                    lines.append(f"{event_dt.strftime('%H:%M')} 「{content}」")
+
+                send_push(user_id, [text_message("\n".join(lines))])
+
+                for reminder_id, _, _ in items:
+                    conn.execute(
+                        "UPDATE reminders SET last_day_notice_date = %s WHERE id = %s",
+                        (today_str, reminder_id)
+                    )
+
+                sent_today_digest += 1
+
         deleted_cur = conn.execute(
             """
             DELETE FROM reminders
@@ -980,6 +989,7 @@ def send_due_notifications() -> dict[str, Any]:
 
     return {
         "ok": True,
+        "sent_today_digest": sent_today_digest,
         "sent_1h": sent_1h,
         "sent_10m": sent_10m,
         "sent_exact": sent_exact,
