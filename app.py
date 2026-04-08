@@ -416,24 +416,27 @@ def main_menu_message() -> FlexMessage:
     bubble = FlexBubble(
         body=FlexBox(
             layout="vertical",
-            spacing="md",
+            spacing="lg",
+            padding_all="20px",
             contents=[
                 FlexText(text="メニュー", weight="bold", size="xl"),
-                FlexSeparator(),
+                FlexSeparator(margin="md"),
                 FlexBox(
                     layout="horizontal",
-                    spacing="sm",
+                    spacing="lg",
+                    margin="lg",
                     contents=[
-                        menu_button("リマインド", "リマインド"),
-                        menu_button("ほしいもの", "ほしいもの"),
+                        menu_button("リマインド", "リマインド", primary=True),
+                        menu_button("ほしいもの", "ほしいもの", primary=True),
                     ]
                 ),
                 FlexBox(
                     layout="horizontal",
-                    spacing="sm",
+                    spacing="lg",
+                    margin="md",
                     contents=[
-                        menu_button("Coming Soon", "Coming Soon"),
-                        menu_button("保存・復元", "保存復元"),
+                        menu_button("Coming Soon", "Coming Soon", primary=False),
+                        menu_button("保存・復元", "保存復元", primary=True, uri=LIFF_BACKUP_URL),
                     ]
                 ),
             ]
@@ -445,17 +448,26 @@ def main_menu_message() -> FlexMessage:
     )
 
 
-def menu_button(label: str, text: str) -> FlexBox:
+def menu_button(label: str, text: str, primary: bool = True, uri: str | None = None) -> FlexBox:
+    action = URIAction(label=label, uri=uri) if uri else MessageAction(label=label, text=text)
+
     return FlexBox(
         layout="vertical",
         flex=1,
-        padding_all="10px",
-        background_color="#F5F5F5",
-        corner_radius="md",
+        height="72px",
+        justify_content="center",
+        align_items="center",
+        background_color="#1EC94C" if primary else "#D9DDE3",
+        corner_radius="14px",
+        action=action,
         contents=[
-            FlexButton(
-                style="primary" if "Coming Soon" not in label else "secondary",
-                action=MessageAction(label=label, text=text)
+            FlexText(
+                text=label,
+                color="#FFFFFF" if primary else "#222222",
+                weight="bold",
+                size="md",
+                align="center",
+                wrap=True
             )
         ]
     )
@@ -1425,14 +1437,12 @@ async function loadCalendar() {{
   const data = await apiGet(`/api/reminders/calendar?year=${{year}}&month=${{month}}`);
 
   monthLabel.textContent = `${{year}}/${{String(month).padStart(2, "0")}}`;
+  renderCalendarGrid(data.days, year, month);
 
   if (!selectedDate) {{
-    const today = new Date();
-    selectedDate =
-      `${{today.getFullYear()}}-${{String(today.getMonth() + 1).padStart(2, "0")}}-${{String(today.getDate()).padStart(2, "0")}}`;
+    selectedDate = data.days.find(x => x.has_items)?.date || `${{year}}-${{String(month).padStart(2, "0")}}-01`;
   }}
 
-  renderCalendarGrid(data.days, year, month);
   await loadCalendarItems(selectedDate);
 }}
 
@@ -2198,7 +2208,9 @@ def handle_text_message(user_id: str, text: str, reply_token: str):
     if text == "保存復元":
         reset_state(user_id)
         send_reply(reply_token, [
-            text_message("どっちにする？", quick_reply=save_restore_quick_reply())
+            text_message("保存・復元はこちら", quick_reply=QuickReply(items=[
+                QuickReplyItem(action=URIAction(label="開く", uri=LIFF_BACKUP_URL))
+            ]))
         ])
         return
 
