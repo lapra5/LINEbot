@@ -1425,12 +1425,14 @@ async function loadCalendar() {{
   const data = await apiGet(`/api/reminders/calendar?year=${{year}}&month=${{month}}`);
 
   monthLabel.textContent = `${{year}}/${{String(month).padStart(2, "0")}}`;
-  renderCalendarGrid(data.days, year, month);
 
   if (!selectedDate) {{
-    selectedDate = data.days.find(x => x.has_items)?.date || `${{year}}-${{String(month).padStart(2, "0")}}-01`;
+    const today = new Date();
+    selectedDate =
+      `${{today.getFullYear()}}-${{String(today.getMonth() + 1).padStart(2, "0")}}-${{String(today.getDate()).padStart(2, "0")}}`;
   }}
 
+  renderCalendarGrid(data.days, year, month);
   await loadCalendarItems(selectedDate);
 }}
 
