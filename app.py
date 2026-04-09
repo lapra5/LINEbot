@@ -416,27 +416,24 @@ def main_menu_message() -> FlexMessage:
     bubble = FlexBubble(
         body=FlexBox(
             layout="vertical",
-            spacing="lg",
-            padding_all="20px",
+            spacing="md",
             contents=[
                 FlexText(text="メニュー", weight="bold", size="xl"),
-                FlexSeparator(margin="md"),
+                FlexSeparator(),
                 FlexBox(
                     layout="horizontal",
-                    spacing="lg",
-                    margin="lg",
+                    spacing="sm",
                     contents=[
-                        menu_button("リマインド", "リマインド", primary=True),
-                        menu_button("ほしいもの", "ほしいもの", primary=True),
+                        menu_button("リマインド", "リマインド"),
+                        menu_button("ほしいもの", "ほしいもの"),
                     ]
                 ),
                 FlexBox(
                     layout="horizontal",
-                    spacing="lg",
-                    margin="md",
+                    spacing="sm",
                     contents=[
-                        menu_button("Coming Soon", "Coming Soon", primary=False),
-                        menu_button("保存・復元", "保存復元", primary=True, uri=LIFF_BACKUP_URL),
+                        menu_button("Coming Soon", "Coming Soon"),
+                        menu_button("保存・復元", "保存復元"),
                     ]
                 ),
             ]
@@ -448,26 +445,17 @@ def main_menu_message() -> FlexMessage:
     )
 
 
-def menu_button(label: str, text: str, primary: bool = True, uri: str | None = None) -> FlexBox:
-    action = URIAction(label=label, uri=uri) if uri else MessageAction(label=label, text=text)
-
+def menu_button(label: str, text: str) -> FlexBox:
     return FlexBox(
         layout="vertical",
         flex=1,
-        height="72px",
-        justify_content="center",
-        align_items="center",
-        background_color="#1EC94C" if primary else "#D9DDE3",
-        corner_radius="14px",
-        action=action,
+        padding_all="10px",
+        background_color="#F5F5F5",
+        corner_radius="md",
         contents=[
-            FlexText(
-                text=label,
-                color="#FFFFFF" if primary else "#222222",
-                weight="bold",
-                size="md",
-                align="center",
-                wrap=True
+            FlexButton(
+                style="primary" if "Coming Soon" not in label else "secondary",
+                action=MessageAction(label=label, text=text)
             )
         ]
     )
@@ -557,20 +545,27 @@ def parse_datetime_input(text: str) -> dict[str, Any] | None:
     def need_time() -> dict[str, str]:
         return {"error": "time_required"}
 
-    m = re.search(r"来週\s*(月曜?日?|火曜?日?|水曜?日?|木曜?日?|金曜?日?|土曜?日?|日曜?日?)", s)
+    m = re.search(r"(今週|来週|再来週)\s*(月曜?日?|火曜?日?|水曜?日?|木曜?日?|金曜?日?|土曜?日?|日曜?日?)", s)
     if m:
-        wd_text = m.group(1)
+        week_text = m.group(1)
+        wd_text = m.group(2)
         weekday = WEEKDAY_MAP.get(wd_text)
         if weekday is not None:
             hhmm = require_time_hhmm(s)
             if not hhmm:
                 return need_time()
+
+            week_offset = {"今週": 0, "来週": 1, "再来週": 2}[week_text]
             current_weekday = now.weekday()
-            days_until_next_monday = 7 - current_weekday
-            next_monday = (now + timedelta(days=days_until_next_monday)).date()
-            target_date = next_monday + timedelta(days=weekday)
+            start_of_this_week = now.date() - timedelta(days=current_weekday)
+            target_date = start_of_this_week + timedelta(days=7 * week_offset + weekday)
+
             hh, mm = map(int, hhmm.split(":"))
             dt = datetime.combine(target_date, time(hh, mm), tzinfo=TZ)
+
+            if dt < now:
+                return {"error": "past_datetime"}
+
             return {"kind": "single", "scheduled_at": dt, "time_hhmm": hhmm}
 
     for key, add_days in [("今日", 0), ("明日", 1), ("明後日", 2)]:
@@ -1437,14 +1432,12 @@ async function loadCalendar() {{
   const data = await apiGet(`/api/reminders/calendar?year=${{year}}&month=${{month}}`);
 
   monthLabel.textContent = `${{year}}/${{String(month).padStart(2, "0")}}`;
+  renderCalendarGrid(data.days, year, month);
 
   if (!selectedDate) {{
-    const today = new Date();
-    selectedDate =
-      `${{today.getFullYear()}}-${{String(today.getMonth() + 1).padStart(2, "0")}}-${{String(today.getDate()).padStart(2, "0")}}`;
+    selectedDate = data.days.find(x => x.has_items)?.date || `${{year}}-${{String(month).padStart(2, "0")}}-01`;
   }}
 
-  renderCalendarGrid(data.days, year, month);
   await loadCalendarItems(selectedDate);
 }}
 
@@ -2210,9 +2203,7 @@ def handle_text_message(user_id: str, text: str, reply_token: str):
     if text == "保存復元":
         reset_state(user_id)
         send_reply(reply_token, [
-            text_message("保存・復元はこちら", quick_reply=QuickReply(items=[
-                QuickReplyItem(action=URIAction(label="開く", uri=LIFF_BACKUP_URL))
-            ]))
+            text_message("どっちにする？", quick_reply=save_restore_quick_reply())
         ])
         return
 
@@ -2289,7 +2280,9 @@ def handle_text_message(user_id: str, text: str, reply_token: str):
             "次の形式で送ってね。\n"
             "・明日 10:00\n"
             "・水曜日 08:00\n"
+            "・今週日曜日 15:00\n"
             "・来週金曜日 15:00\n"
+            "・再来週火曜日 18:30\n"
             "・10時\n"
             "・10時30分\n"
             "・3分後\n"
@@ -2307,10 +2300,25 @@ def handle_text_message(user_id: str, text: str, reply_token: str):
                 "時刻もいっしょに送ってね。\n"
                 "例：\n"
                 "・明日 10:00\n"
-                "・水曜日 08:00\n"
+                "・今週日曜日 15:00\n"
                 "・来週金曜日 15:00\n"
+                "・再来週火曜日 18:30\n"
                 "・YYYYMMDD HH:MM\n"
                 "・M/D HH:MM",
+                quick_reply=cancel_quick_reply()
+            )])
+            return
+
+        if parsed and parsed.get("error") == "past_datetime":
+            send_reply(reply_token, [text_message(
+                "その日時はもう過ぎているよ。\n"
+                "別の日時を送ってね。\n"
+                "例：\n"
+                "・今日 18:00\n"
+                "・明日 10:00\n"
+                "・今週日曜日 15:00\n"
+                "・来週金曜日 15:00\n"
+                "・再来週火曜日 18:30",
                 quick_reply=cancel_quick_reply()
             )])
             return
@@ -2322,7 +2330,9 @@ def handle_text_message(user_id: str, text: str, reply_token: str):
                 "次の形式で送ってね。\n"
                 "・明日 10:00\n"
                 "・水曜日 08:00\n"
+                "・今週日曜日 15:00\n"
                 "・来週金曜日 15:00\n"
+                "・再来週火曜日 18:30\n"
                 "・10時\n"
                 "・10時30分\n"
                 "・3分後\n"
