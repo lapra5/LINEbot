@@ -48,10 +48,8 @@ CRON_SECRET = os.getenv("CRON_SECRET", "")
 LINE_LOGIN_CHANNEL_ID = os.getenv("LINE_LOGIN_CHANNEL_ID", "")
 LIFF_REMINDER_ID = os.getenv("LIFF_REMINDER_ID", "")
 LIFF_WANT_ID = os.getenv("LIFF_WANT_ID", "")
-LIFF_BACKUP_ID = os.getenv("LIFF_BACKUP_ID", "")
 LIFF_REMINDER_URL = os.getenv("LIFF_REMINDER_URL", "")
 LIFF_WANT_URL = os.getenv("LIFF_WANT_URL", "")
-LIFF_BACKUP_URL = os.getenv("LIFF_BACKUP_URL", "")
 
 if not CHANNEL_ACCESS_TOKEN or not CHANNEL_SECRET or not BOT_PASSWORD:
     raise RuntimeError(
@@ -67,8 +65,8 @@ if not CRON_SECRET:
 if not LINE_LOGIN_CHANNEL_ID:
     raise RuntimeError("環境変数 LINE_LOGIN_CHANNEL_ID を設定してください。")
 
-if not LIFF_REMINDER_ID or not LIFF_WANT_ID or not LIFF_BACKUP_ID or not LIFF_REMINDER_URL or not LIFF_WANT_URL or not LIFF_BACKUP_URL:
-    raise RuntimeError("環境変数 LIFF_REMINDER_ID / LIFF_WANT_ID / LIFF_BACKUP_ID / LIFF_REMINDER_URL / LIFF_WANT_URL / LIFF_BACKUP_URL を設定してください。")
+if not LIFF_REMINDER_ID or not LIFF_WANT_ID or not LIFF_REMINDER_URL or not LIFF_WANT_URL:
+    raise RuntimeError("環境変数 LIFF_REMINDER_ID / LIFF_WANT_ID / LIFF_REMINDER_URL / LIFF_WANT_URL を設定してください。")
 
 app = FastAPI()
 parser = WebhookParser(CHANNEL_SECRET)
@@ -142,15 +140,6 @@ def init_db():
             id BIGSERIAL PRIMARY KEY,
             user_id TEXT NOT NULL,
             content TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        )
-        """)
-
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS backups (
-            id BIGSERIAL PRIMARY KEY,
-            user_id TEXT NOT NULL,
-            data JSONB NOT NULL,
             created_at TEXT NOT NULL
         )
         """)
@@ -387,16 +376,6 @@ def cancel_quick_reply() -> QuickReply:
         ]
     )
 
-
-def save_restore_quick_reply() -> QuickReply:
-    return QuickReply(
-        items=[
-            QuickReplyItem(action=MessageAction(label="保存", text="保存")),
-            QuickReplyItem(action=MessageAction(label="復元", text="復元")),
-            QuickReplyItem(action=MessageAction(label="メニューに戻る", text="メニュー")),
-        ]
-    )
-
 def safe_date_str(y: int, m: int, d: int) -> str:
     zw = "\u200b"
     return f"{y}-{zw}{m:02d}-{zw}{d:02d}"
@@ -416,27 +395,24 @@ def main_menu_message() -> FlexMessage:
     bubble = FlexBubble(
         body=FlexBox(
             layout="vertical",
-            spacing="lg",
-            padding_all="20px",
+            spacing="md",
             contents=[
                 FlexText(text="メニュー", weight="bold", size="xl"),
-                FlexSeparator(margin="md"),
+                FlexSeparator(),
                 FlexBox(
                     layout="horizontal",
-                    spacing="lg",
-                    margin="lg",
+                    spacing="sm",
                     contents=[
-                        menu_button("リマインド", "リマインド", primary=True),
-                        menu_button("ほしいもの", "ほしいもの", primary=True),
+                        menu_button("リマインド", "リマインド"),
+                        menu_button("ほしいもの", "ほしいもの"),
                     ]
                 ),
                 FlexBox(
                     layout="horizontal",
-                    spacing="lg",
-                    margin="md",
+                    spacing="sm",
                     contents=[
-                        menu_button("Coming Soon", "Coming Soon", primary=False),
-                        menu_button("保存・復元", "保存復元", primary=True, uri=LIFF_BACKUP_URL),
+                        menu_button("Coming Soon", "Coming Soon"),
+                        menu_button("Coming Soon", "Coming Soon"),
                     ]
                 ),
             ]
@@ -448,26 +424,17 @@ def main_menu_message() -> FlexMessage:
     )
 
 
-def menu_button(label: str, text: str, primary: bool = True, uri: str | None = None) -> FlexBox:
-    action = URIAction(label=label, uri=uri) if uri else MessageAction(label=label, text=text)
-
+def menu_button(label: str, text: str) -> FlexBox:
     return FlexBox(
         layout="vertical",
         flex=1,
-        height="72px",
-        justify_content="center",
-        align_items="center",
-        background_color="#1EC94C" if primary else "#D9DDE3",
-        corner_radius="14px",
-        action=action,
+        padding_all="10px",
+        background_color="#F5F5F5",
+        corner_radius="md",
         contents=[
-            FlexText(
-                text=label,
-                color="#FFFFFF" if primary else "#222222",
-                weight="bold",
-                size="md",
-                align="center",
-                wrap=True
+            FlexButton(
+                style="primary" if "Coming Soon" not in label else "secondary",
+                action=MessageAction(label=label, text=text)
             )
         ]
     )
@@ -680,137 +647,10 @@ def create_reminder(user_id: str, content: str, parsed: dict[str, Any]):
 
 def add_want(user_id: str, content: str):
     with get_conn() as conn:
-        rows = conn.execute(
-            """
-            SELECT id
-            FROM wants
-            WHERE user_id = %s
-            ORDER BY created_at ASC
-            """,
-            (user_id,)
-        ).fetchall()
-
-        if len(rows) >= 5:
-            conn.execute(
-                "DELETE FROM wants WHERE id = %s",
-                (rows[0]["id"],)
-            )
-
         conn.execute(
             "INSERT INTO wants (user_id, content, created_at) VALUES (%s, %s, %s)",
             (user_id, content, now_jst().isoformat())
         )
-
-
-def save_backup(user_id: str) -> str:
-    with get_conn() as conn:
-        reminders = conn.execute(
-            """
-            SELECT content, kind, scheduled_at, weekday, time_hhmm
-            FROM reminders
-            WHERE user_id = %s
-            ORDER BY created_at ASC
-            """,
-            (user_id,)
-        ).fetchall()
-
-        wants = conn.execute(
-            """
-            SELECT content
-            FROM wants
-            WHERE user_id = %s
-            ORDER BY created_at ASC
-            """,
-            (user_id,)
-        ).fetchall()
-
-        if not reminders and not wants:
-            return "skip"
-
-        data = {
-            "reminders": [dict(r) for r in reminders],
-            "wants": [dict(w) for w in wants],
-        }
-
-        backups = conn.execute(
-            """
-            SELECT id
-            FROM backups
-            WHERE user_id = %s
-            ORDER BY created_at ASC
-            """,
-            (user_id,)
-        ).fetchall()
-
-        if len(backups) >= 5:
-            conn.execute(
-                "DELETE FROM backups WHERE id = %s",
-                (backups[0]["id"],)
-            )
-
-        conn.execute(
-            "INSERT INTO backups (user_id, data, created_at) VALUES (%s, %s, %s)",
-            (user_id, json.dumps(data, ensure_ascii=False), now_jst().isoformat())
-        )
-
-        return "saved"
-
-
-def list_backups(user_id: str) -> list[dict[str, Any]]:
-    with get_conn() as conn:
-        return conn.execute(
-            """
-            SELECT id, created_at
-            FROM backups
-            WHERE user_id = %s
-            ORDER BY created_at DESC
-            """,
-            (user_id,)
-        ).fetchall()
-
-
-def restore_backup(user_id: str, backup_id: int) -> bool:
-    with get_conn() as conn:
-        row = conn.execute(
-            "SELECT data FROM backups WHERE id = %s AND user_id = %s",
-            (backup_id, user_id)
-        ).fetchone()
-
-        if not row:
-            return False
-
-        data = row["data"]
-
-        conn.execute("DELETE FROM reminders WHERE user_id = %s", (user_id,))
-        conn.execute("DELETE FROM wants WHERE user_id = %s", (user_id,))
-
-        for r in data.get("reminders", []):
-            conn.execute(
-                """
-                INSERT INTO reminders (
-                    user_id, content, kind, scheduled_at, weekday, time_hhmm,
-                    last_day_notice_date, last_1h_notice_date, last_10m_notice_date, last_exact_notice_date, created_at
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, NULL, NULL, NULL, NULL, %s)
-                """,
-                (
-                    user_id,
-                    r.get("content", ""),
-                    r.get("kind", "single"),
-                    r.get("scheduled_at"),
-                    r.get("weekday"),
-                    r.get("time_hhmm", "00:00"),
-                    now_jst().isoformat(),
-                )
-            )
-
-        for w in data.get("wants", []):
-            conn.execute(
-                "INSERT INTO wants (user_id, content, created_at) VALUES (%s, %s, %s)",
-                (user_id, w.get("content", ""), now_jst().isoformat())
-            )
-
-        return True
 
 
 def delete_reminder_by_id(user_id: str, reminder_id: int) -> bool:
@@ -911,13 +751,10 @@ def send_due_notifications() -> dict[str, Any]:
     sent_1h = 0
     sent_10m = 0
     sent_exact = 0
-    sent_today_digest = 0
     deleted_single = 0
 
     with get_conn() as conn:
         rows = conn.execute("SELECT * FROM reminders").fetchall()
-
-        today_items_by_user: dict[str, list[tuple[int, datetime, str]]] = {}
 
         for row in rows:
             occurrence = get_today_occurrences(row, current)
@@ -928,9 +765,11 @@ def send_due_notifications() -> dict[str, Any]:
             one_hour_before = event_dt - timedelta(hours=1)
             ten_min_before = event_dt - timedelta(minutes=10)
 
-            if row["last_day_notice_date"] != today_str:
-                today_items_by_user.setdefault(row["user_id"], []).append(
-                    (row["id"], event_dt, row["content"])
+            if row["last_day_notice_date"] != today_str and current.hour == 0 and current.minute == 0:
+                send_push(row["user_id"], [text_message(f"今日の予定の一つだよ。\n{event_dt.strftime('%H:%M')} {row['content']}")])
+                conn.execute(
+                    "UPDATE reminders SET last_day_notice_date = %s WHERE id = %s",
+                    (today_str, row["id"])
                 )
 
             if row["last_1h_notice_date"] != today_str:
@@ -960,24 +799,6 @@ def send_due_notifications() -> dict[str, Any]:
                     )
                     sent_exact += 1
 
-        if current.hour == 0 and current.minute == 0:
-            for user_id, items in today_items_by_user.items():
-                items.sort(key=lambda x: x[1])
-
-                lines = ["今日の予定だよ。"]
-                for _, event_dt, content in items:
-                    lines.append(f"{event_dt.strftime('%H:%M')} 「{content}」")
-
-                send_push(user_id, [text_message("\n".join(lines))])
-
-                for reminder_id, _, _ in items:
-                    conn.execute(
-                        "UPDATE reminders SET last_day_notice_date = %s WHERE id = %s",
-                        (today_str, reminder_id)
-                    )
-
-                sent_today_digest += 1
-
         deleted_cur = conn.execute(
             """
             DELETE FROM reminders
@@ -1001,7 +822,6 @@ def send_due_notifications() -> dict[str, Any]:
 
     return {
         "ok": True,
-        "sent_today_digest": sent_today_digest,
         "sent_1h": sent_1h,
         "sent_10m": sent_10m,
         "sent_exact": sent_exact,
@@ -1437,12 +1257,14 @@ async function loadCalendar() {{
   const data = await apiGet(`/api/reminders/calendar?year=${{year}}&month=${{month}}`);
 
   monthLabel.textContent = `${{year}}/${{String(month).padStart(2, "0")}}`;
-  renderCalendarGrid(data.days, year, month);
 
   if (!selectedDate) {{
-    selectedDate = data.days.find(x => x.has_items)?.date || `${{year}}-${{String(month).padStart(2, "0")}}-01`;
+    const today = new Date();
+    selectedDate =
+      `${{today.getFullYear()}}-${{String(today.getMonth() + 1).padStart(2, "0")}}-${{String(today.getDate()).padStart(2, "0")}}`;
   }}
 
+  renderCalendarGrid(data.days, year, month);
   await loadCalendarItems(selectedDate);
 }}
 
@@ -1813,333 +1635,6 @@ boot();
 """
 
 
-def build_backups_liff_html() -> str:
-    return f"""
-<!DOCTYPE html>
-<html lang="ja">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <title>バックアップ</title>
-  <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
-  <style>
-    * {{ box-sizing: border-box; }}
-    body {{
-      margin: 0;
-      font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
-      background: #f5f6f8;
-      color: #222;
-    }}
-    .wrap {{ padding: 14px 14px 24px; }}
-    .topbar {{
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      margin-bottom: 12px;
-    }}
-    .title {{
-      font-size: 20px;
-      font-weight: 700;
-    }}
-    .close-btn {{
-      width: 36px;
-      height: 36px;
-      border: none;
-      border-radius: 18px;
-      background: #e9ecef;
-      font-size: 20px;
-      cursor: pointer;
-    }}
-    .action-card, .card {{
-      background: #fff;
-      border-radius: 16px;
-      padding: 14px;
-      margin-bottom: 12px;
-      box-shadow: 0 2px 10px rgba(0,0,0,0.06);
-    }}
-    .save-btn, .restore-btn {{
-      width: 100%;
-      border: none;
-      border-radius: 12px;
-      padding: 12px 14px;
-      font-weight: 700;
-      cursor: pointer;
-      background: #12b85a;
-      color: #fff;
-      font-size: 15px;
-    }}
-    .restore-btn {{
-      width: auto;
-      min-width: 96px;
-      padding: 10px 14px;
-    }}
-    .sub {{
-      font-size: 13px;
-      color: #666;
-      margin-top: 8px;
-    }}
-    .latest {{
-      font-size: 14px;
-      font-weight: 700;
-      margin-bottom: 10px;
-    }}
-    .card-head {{
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 12px;
-    }}
-    .card-title {{
-      font-size: 15px;
-      font-weight: 700;
-      line-height: 1.4;
-      word-break: break-word;
-    }}
-    .empty {{
-      padding: 18px;
-      text-align: center;
-      color: #666;
-      background: #fff;
-      border-radius: 16px;
-      box-shadow: 0 2px 10px rgba(0,0,0,0.06);
-    }}
-    .toast {{
-      position: fixed;
-      left: 50%;
-      bottom: 18px;
-      transform: translateX(-50%);
-      background: rgba(34,34,34,0.92);
-      color: #fff;
-      padding: 10px 14px;
-      border-radius: 999px;
-      font-size: 13px;
-      opacity: 0;
-      pointer-events: none;
-      transition: opacity 0.2s ease;
-      z-index: 1000;
-    }}
-    .toast.show {{ opacity: 1; }}
-    .modal-backdrop {{
-      position: fixed;
-      inset: 0;
-      background: rgba(0,0,0,0.35);
-      display: none;
-      align-items: flex-end;
-      justify-content: center;
-      padding: 14px;
-    }}
-    .modal-backdrop.show {{ display: flex; }}
-    .modal {{
-      width: 100%;
-      max-width: 420px;
-      background: #fff;
-      border-radius: 18px;
-      padding: 16px;
-      box-shadow: 0 8px 24px rgba(0,0,0,0.18);
-    }}
-    .modal-text {{
-      font-size: 16px;
-      line-height: 1.5;
-      margin-bottom: 14px;
-      white-space: pre-wrap;
-      word-break: break-word;
-    }}
-    .modal-actions {{
-      display: flex;
-      justify-content: flex-end;
-      gap: 10px;
-    }}
-    .btn {{
-      border: none;
-      border-radius: 12px;
-      padding: 10px 16px;
-      font-weight: 700;
-      cursor: pointer;
-    }}
-    .btn-no {{ background: #e9ecef; }}
-    .btn-yes {{ background: #12b85a; color: #fff; }}
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <div class="topbar">
-      <div class="title">バックアップ</div>
-      <button class="close-btn" id="closeBtn">×</button>
-    </div>
-
-    <div class="action-card">
-      <button class="save-btn" id="saveBtn">保存する</button>
-      <div class="sub">最大5件まで保存。6件目は一番古い保存を上書きするよ。</div>
-    </div>
-
-    <div class="latest" id="latestText">最終保存日時: なし</div>
-    <div id="backupList"></div>
-  </div>
-
-  <div class="modal-backdrop" id="restoreModal">
-    <div class="modal">
-      <div class="modal-text" id="restoreText"></div>
-      <div class="modal-actions">
-        <button class="btn btn-no" id="restoreNo">キャンセル</button>
-        <button class="btn btn-yes" id="restoreYes">復元する</button>
-      </div>
-    </div>
-  </div>
-
-  <div class="toast" id="toast"></div>
-
-<script>
-const LIFF_ID = "{LIFF_BACKUP_ID}";
-let idToken = "";
-let restoreTargetId = null;
-
-const backupList = document.getElementById("backupList");
-const latestText = document.getElementById("latestText");
-const restoreModal = document.getElementById("restoreModal");
-const restoreText = document.getElementById("restoreText");
-const toast = document.getElementById("toast");
-
-document.getElementById("closeBtn").addEventListener("click", () => {{
-  if (window.liff) liff.closeWindow();
-}});
-
-document.getElementById("saveBtn").addEventListener("click", async () => {{
-  const res = await fetch("/api/backups/save", {{
-    method: "POST",
-    headers: {{ "x-line-id-token": idToken }}
-  }});
-  const data = await res.json();
-
-  if (data.status === "skip") {{
-    showToast("保存できるデータがまだないよ。", 2200);
-    return;
-  }}
-
-  showToast("保存成功", 1800);
-  await loadBackups();
-}});
-
-document.getElementById("restoreNo").addEventListener("click", () => {{
-  restoreModal.classList.remove("show");
-  restoreTargetId = null;
-}});
-
-document.getElementById("restoreYes").addEventListener("click", async () => {{
-  if (!restoreTargetId) return;
-
-  const res = await fetch(`/api/backups/restore/${{restoreTargetId}}`, {{
-    method: "POST",
-    headers: {{ "x-line-id-token": idToken }}
-  }});
-  const data = await res.json();
-
-  restoreModal.classList.remove("show");
-  restoreTargetId = null;
-
-  if (data.ok) {{
-    showToast("復元成功", 1800);
-  }} else {{
-    showToast("復元に失敗したよ。", 2200);
-  }}
-}});
-
-function escapeHtml(text) {{
-  return String(text)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
-}}
-
-function showToast(message, ms) {{
-  toast.textContent = message;
-  toast.classList.add("show");
-  clearTimeout(window.__toastTimer);
-  window.__toastTimer = setTimeout(() => {{
-    toast.classList.remove("show");
-  }}, ms);
-}}
-
-function formatBackupDate(iso) {{
-  const d = new Date(iso);
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  const hh = String(d.getHours()).padStart(2, "0");
-  const mm = String(d.getMinutes()).padStart(2, "0");
-  return `${{y}}/${{m}}/${{day}} ${{hh}}:${{mm}}`;
-}}
-
-function openRestoreModal(id, createdAt) {{
-  restoreTargetId = id;
-  restoreText.textContent = `この保存データ（${{formatBackupDate(createdAt)}}）を復元しますか？
-現在のリマインドとほしいものはこの内容で置き換わるよ。`;
-  restoreModal.classList.add("show");
-}}
-
-async function loadBackups() {{
-  const res = await fetch("/api/backups", {{
-    headers: {{ "x-line-id-token": idToken }}
-  }});
-  const data = await res.json();
-
-  if (!data.items.length) {{
-    latestText.textContent = "最終保存日時: なし";
-    backupList.innerHTML = '<div class="empty">まだ保存データはないよ。</div>';
-    return;
-  }}
-
-  latestText.textContent = `最終保存日時: ${{formatBackupDate(data.items[0].created_at)}}`;
-
-  backupList.innerHTML = data.items.map(item => `
-    <div class="card">
-      <div class="card-head">
-        <div class="card-title">${{escapeHtml(formatBackupDate(item.created_at))}}</div>
-        <button class="restore-btn" data-id="${{item.id}}" data-created-at="${{item.created_at}}">復元</button>
-      </div>
-    </div>
-  `).join("");
-
-  backupList.querySelectorAll(".restore-btn").forEach(btn => {{
-    btn.addEventListener("click", () => {{
-      openRestoreModal(Number(btn.dataset.id), btn.dataset.createdAt);
-    }});
-  }});
-}}
-
-async function boot() {{
-  try {{
-    await liff.init({{ liffId: LIFF_ID }});
-
-    if (!liff.isLoggedIn()) {{
-      liff.login();
-      return;
-    }}
-
-    idToken = liff.getIDToken() || "";
-    if (!idToken) {{
-      throw new Error("IDトークンを取得できなかったよ。LIFFのscopeで openid を確認してね。");
-    }}
-
-    await loadBackups();
-  }} catch (err) {{
-    document.body.innerHTML = `
-      <div style="padding:16px;font-family:sans-serif;">
-        <h3>LIFFの読み込みに失敗したよ</h3>
-        <pre style="white-space:pre-wrap;">${{escapeHtml(String(err))}}</pre>
-      </div>
-    `;
-  }}
-}}
-
-boot();
-</script>
-</body>
-</html>
-"""
-
-
 def handle_text_message(user_id: str, text: str, reply_token: str):
     state = get_state(user_id)
 
@@ -2196,47 +1691,9 @@ def handle_text_message(user_id: str, text: str, reply_token: str):
         reset_state(user_id)
         send_reply(reply_token, [main_menu_message()])
         return
-    
+
     if text == "Coming Soon":
-        reset_state(user_id)
-        send_reply(reply_token, [
-            text_message("ここは準備中だよ。"),
-            main_menu_message()
-        ])
-        return
-
-    if text == "保存復元":
-        reset_state(user_id)
-        send_reply(reply_token, [
-            text_message("保存・復元はこちら", quick_reply=QuickReply(items=[
-                QuickReplyItem(action=URIAction(label="開く", uri=LIFF_BACKUP_URL))
-            ]))
-        ])
-        return
-
-    if text == "保存":
-        reset_state(user_id)
-        status = save_backup(user_id)
-        if status == "skip":
-            send_reply(reply_token, [
-                text_message("保存できるデータがまだないよ。"),
-                main_menu_message()
-            ])
-        else:
-            send_reply(reply_token, [
-                text_message("保存したよ！"),
-                main_menu_message()
-            ])
-        return
-
-    if text == "復元":
-        reset_state(user_id)
-        send_reply(reply_token, [
-            text_message("バックアップ一覧を開くよ", quick_reply=QuickReply(items=[
-                QuickReplyItem(action=URIAction(label="開く", uri=LIFF_BACKUP_URL)),
-                QuickReplyItem(action=MessageAction(label="メニューに戻る", text="メニュー")),
-            ]))
-        ])
+        send_reply(reply_token, [text_message("ここは準備中だよ。")])
         return
 
     if text == "リマインド":
@@ -2384,11 +1841,6 @@ def liff_wants():
     return HTMLResponse(build_wants_liff_html())
 
 
-@app.get("/liff/backups", response_class=HTMLResponse)
-def liff_backups():
-    return HTMLResponse(build_backups_liff_html())
-
-
 @app.get("/api/reminders/one-time")
 def api_reminders_one_time(x_line_id_token: str | None = Header(default=None)):
     user_id = get_user_id_from_verified_id_token(x_line_id_token)
@@ -2507,24 +1959,6 @@ def api_delete_want(want_id: int, x_line_id_token: str | None = Header(default=N
     user_id = get_user_id_from_verified_id_token(x_line_id_token)
     ok = delete_want_by_id(user_id, want_id)
     return {"ok": ok}
-
-
-@app.post("/api/backups/save")
-def api_save_backup(x_line_id_token: str | None = Header(default=None)):
-    user_id = get_user_id_from_verified_id_token(x_line_id_token)
-    return {"status": save_backup(user_id)}
-
-
-@app.get("/api/backups")
-def api_backups(x_line_id_token: str | None = Header(default=None)):
-    user_id = get_user_id_from_verified_id_token(x_line_id_token)
-    return {"items": list_backups(user_id)}
-
-
-@app.post("/api/backups/restore/{backup_id}")
-def api_restore_backup(backup_id: int, x_line_id_token: str | None = Header(default=None)):
-    user_id = get_user_id_from_verified_id_token(x_line_id_token)
-    return {"ok": restore_backup(user_id, backup_id)}
 
 
 @app.post("/jobs/send-due-notifications")
