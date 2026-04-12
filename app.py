@@ -412,6 +412,85 @@ def format_weekly_label(weekday: int, hhmm: str) -> str:
     return f"毎週 {JP_WEEK_FULL[weekday]} {hhmm}"
 
 
+def flex_notify_message(title: str, content: str, subtext: str, color: str) -> FlexMessage:
+    bubble = FlexBubble(
+        header=FlexBox(
+            layout="vertical",
+            background_color=color,
+            padding_all="12px",
+            contents=[
+                FlexText(
+                    text=title,
+                    color="#FFFFFF",
+                    weight="bold",
+                    size="lg",
+                    wrap=True,
+                )
+            ],
+        ),
+        body=FlexBox(
+            layout="vertical",
+            spacing="md",
+            padding_all="16px",
+            contents=[
+                FlexText(
+                    text=f"「{content}」",
+                    weight="bold",
+                    size="xl",
+                    wrap=True,
+                ),
+                FlexText(
+                    text=subtext,
+                    size="sm",
+                    color="#666666",
+                    wrap=True,
+                ),
+            ],
+        ),
+    )
+    return FlexMessage(
+        alt_text=f"{title} {content}",
+        contents=FlexContainer.from_json(json.dumps(bubble.to_dict())),
+    )
+
+
+def flex_today_digest_message(items: list[tuple[datetime, str]]) -> FlexMessage:
+    lines = [
+        FlexText(
+            text=f"{event_dt.strftime('%H:%M')}  「{content}」",
+            size="md",
+            wrap=True,
+        )
+        for event_dt, content in items
+    ]
+
+    bubble = FlexBubble(
+        header=FlexBox(
+            layout="vertical",
+            background_color="#10B981",
+            padding_all="12px",
+            contents=[
+                FlexText(
+                    text="📅 今日の予定",
+                    color="#FFFFFF",
+                    weight="bold",
+                    size="lg",
+                )
+            ],
+        ),
+        body=FlexBox(
+            layout="vertical",
+            spacing="md",
+            padding_all="16px",
+            contents=lines if lines else [FlexText(text="今日は予定がないよ。", size="md")],
+        ),
+    )
+    return FlexMessage(
+        alt_text="今日の予定",
+        contents=FlexContainer.from_json(json.dumps(bubble.to_dict())),
+    )
+
+
 def main_menu_message() -> FlexMessage:
     bubble = FlexBubble(
         body=FlexBox(
@@ -942,7 +1021,14 @@ def send_due_notifications() -> dict[str, Any]:
 
             if row["last_1h_notice_date"] != today_str:
                 if current >= one_hour_before and current < one_hour_before + timedelta(minutes=1):
-                    send_push(row["user_id"], [text_message(f"1時間前だよ！「{row['content']}」")])
+                    send_push(row["user_id"], [
+                        flex_notify_message(
+                            "⏰ 1時間前",
+                            row["content"],
+                            f"予定時刻: {event_dt.strftime('%H:%M')}",
+                            "#3B82F6"
+                        )
+                    ])
                     conn.execute(
                         "UPDATE reminders SET last_1h_notice_date = %s WHERE id = %s",
                         (today_str, row["id"])
@@ -951,7 +1037,14 @@ def send_due_notifications() -> dict[str, Any]:
 
             if row["last_10m_notice_date"] != today_str:
                 if current >= ten_min_before and current < ten_min_before + timedelta(minutes=1):
-                    send_push(row["user_id"], [text_message(f"10分前だよ！「{row['content']}」")])
+                    send_push(row["user_id"], [
+                        flex_notify_message(
+                            "🔔 10分前",
+                            row["content"],
+                            f"まもなく {event_dt.strftime('%H:%M')}",
+                            "#F59E0B"
+                        )
+                    ])
                     conn.execute(
                         "UPDATE reminders SET last_10m_notice_date = %s WHERE id = %s",
                         (today_str, row["id"])
@@ -960,7 +1053,14 @@ def send_due_notifications() -> dict[str, Any]:
 
             if row["last_exact_notice_date"] != today_str:
                 if current >= event_dt and current < event_dt + timedelta(minutes=1):
-                    send_push(row["user_id"], [text_message(f"「{row['content']}」の時間だよ！")])
+                    send_push(row["user_id"], [
+                        flex_notify_message(
+                            "⚠️ 時間です",
+                            row["content"],
+                            f"{event_dt.strftime('%H:%M')} の予定",
+                            "#EF4444"
+                        )
+                    ])
                     conn.execute(
                         "UPDATE reminders SET last_exact_notice_date = %s WHERE id = %s",
                         (today_str, row["id"])
@@ -971,11 +1071,8 @@ def send_due_notifications() -> dict[str, Any]:
             for user_id, items in today_items_by_user.items():
                 items.sort(key=lambda x: x[1])
 
-                lines = ["今日の予定だよ。"]
-                for _, event_dt, content in items:
-                    lines.append(f"{event_dt.strftime('%H:%M')} 「{content}」")
-
-                send_push(user_id, [text_message("\n".join(lines))])
+                digest_items = [(event_dt, content) for _, event_dt, content in items]
+                send_push(user_id, [flex_today_digest_message(digest_items)])
 
                 for reminder_id, _, _ in items:
                     conn.execute(
