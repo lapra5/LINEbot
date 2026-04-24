@@ -626,6 +626,47 @@ def parse_datetime_input(text: str) -> dict[str, Any] | None:
     s = normalize_digits(text.strip())
     now = now_jst()
 
+    def need_time() -> dict[str, str]:
+        return {"error": "time_required"}
+
+    # 日付が入っている場合は、曜日に見える文字があっても必ず単発予定にする
+    m = re.search(r"\b(\d{4})(\d{2})(\d{2})\b", s)
+    if m:
+        y, mo, d = map(int, m.groups())
+        hhmm = require_time_hhmm(s)
+        if not hhmm:
+            return need_time()
+        hh, mm = map(int, hhmm.split(":"))
+        dt = datetime(y, mo, d, hh, mm, tzinfo=TZ)
+        if dt < now:
+            return {"error": "past_datetime"}
+        return {"kind": "single", "scheduled_at": dt, "time_hhmm": hhmm}
+
+    m = re.search(r"\b(\d{4})[-/](\d{1,2})[-/](\d{1,2})\b", s)
+    if m:
+        y, mo, d = map(int, m.groups())
+        hhmm = require_time_hhmm(s)
+        if not hhmm:
+            return need_time()
+        hh, mm = map(int, hhmm.split(":"))
+        dt = datetime(y, mo, d, hh, mm, tzinfo=TZ)
+        if dt < now:
+            return {"error": "past_datetime"}
+        return {"kind": "single", "scheduled_at": dt, "time_hhmm": hhmm}
+
+    m = re.search(r"\b(\d{1,2})/(\d{1,2})\b", s)
+    if m:
+        mo, d = map(int, m.groups())
+        year = now.year
+        hhmm = require_time_hhmm(s)
+        if not hhmm:
+            return need_time()
+        hh, mm = map(int, hhmm.split(":"))
+        dt = datetime(year, mo, d, hh, mm, tzinfo=TZ)
+        if dt < now:
+            dt = datetime(year + 1, mo, d, hh, mm, tzinfo=TZ)
+        return {"kind": "single", "scheduled_at": dt, "time_hhmm": hhmm}
+
     relative_dt = parse_relative_datetime(s)
     if relative_dt:
         return {
@@ -634,8 +675,9 @@ def parse_datetime_input(text: str) -> dict[str, Any] | None:
             "time_hhmm": relative_dt.strftime("%H:%M")
         }
 
+    # 「10時」だけなら次に来るその時刻の単発予定
     time_only = parse_time_only_datetime(s)
-    if time_only and not any(word in s for word in ["今日", "明日", "明後日", "来週", "月", "火", "水", "木", "金", "土", "日", "/"]):
+    if time_only and not any(word in s for word in ["今日", "明日", "明後日", "今週", "来週", "再来週", "月", "火", "水", "木", "金", "土", "日", "/", "-"]):
         dt, hhmm = time_only
         return {
             "kind": "single",
@@ -643,10 +685,8 @@ def parse_datetime_input(text: str) -> dict[str, Any] | None:
             "time_hhmm": hhmm
         }
 
-    def need_time() -> dict[str, str]:
-        return {"error": "time_required"}
-
-    m = re.search(r"(今週|来週|再来週)\s*(月曜?日?|火曜?日?|水曜?日?|木曜?日?|金曜?日?|土曜?日?|日曜?日?)", s)
+    # 「今週月」「来週金」「再来週火」などは単発予定
+    m = re.search(r"(今週|来週|再来週)\s*(月曜日?|月曜?|火曜日?|火曜?|水曜日?|水曜?|木曜日?|木曜?|金曜日?|金曜?|土曜日?|土曜?|日曜日?|日曜?)", s)
     if m:
         week_text = m.group(1)
         wd_text = m.group(2)
@@ -677,41 +717,21 @@ def parse_datetime_input(text: str) -> dict[str, Any] | None:
             target_date = (now + timedelta(days=add_days)).date()
             hh, mm = map(int, hhmm.split(":"))
             dt = datetime.combine(target_date, time(hh, mm), tzinfo=TZ)
+            if dt < now:
+                return {"error": "past_datetime"}
             return {"kind": "single", "scheduled_at": dt, "time_hhmm": hhmm}
 
-    m = re.search(r"\b(\d{4})(\d{2})(\d{2})\b", s)
-    if m:
-        y, mo, d = map(int, m.groups())
+    # 「来週 10:00」のように曜日がない場合は7日後の単発予定
+    if "来週" in s:
         hhmm = require_time_hhmm(s)
         if not hhmm:
             return need_time()
+        target_date = (now + timedelta(days=7)).date()
         hh, mm = map(int, hhmm.split(":"))
-        dt = datetime(y, mo, d, hh, mm, tzinfo=TZ)
+        dt = datetime.combine(target_date, time(hh, mm), tzinfo=TZ)
         return {"kind": "single", "scheduled_at": dt, "time_hhmm": hhmm}
 
-    m = re.search(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b", s)
-    if m:
-        y, mo, d = map(int, m.groups())
-        hhmm = require_time_hhmm(s)
-        if not hhmm:
-            return need_time()
-        hh, mm = map(int, hhmm.split(":"))
-        dt = datetime(y, mo, d, hh, mm, tzinfo=TZ)
-        return {"kind": "single", "scheduled_at": dt, "time_hhmm": hhmm}
-
-    m = re.search(r"\b(\d{1,2})/(\d{1,2})\b", s)
-    if m:
-        mo, d = map(int, m.groups())
-        year = now.year
-        hhmm = require_time_hhmm(s)
-        if not hhmm:
-            return need_time()
-        hh, mm = map(int, hhmm.split(":"))
-        dt = datetime(year, mo, d, hh, mm, tzinfo=TZ)
-        if dt < now:
-            dt = datetime(year + 1, mo, d, hh, mm, tzinfo=TZ)
-        return {"kind": "single", "scheduled_at": dt, "time_hhmm": hhmm}
-
+    # 曜日は1文字でも毎週予定として扱う。日付判定より後なので「5/11」は単発のまま。
     weekday_found = None
     for key, value in WEEKDAY_MAP.items():
         if key in s:
@@ -723,15 +743,6 @@ def parse_datetime_input(text: str) -> dict[str, Any] | None:
         if not hhmm:
             return need_time()
         return {"kind": "weekly", "weekday": weekday_found, "time_hhmm": hhmm}
-
-    if "来週" in s:
-        hhmm = require_time_hhmm(s)
-        if not hhmm:
-            return need_time()
-        target_date = (now + timedelta(days=7)).date()
-        hh, mm = map(int, hhmm.split(":"))
-        dt = datetime.combine(target_date, time(hh, mm), tzinfo=TZ)
-        return {"kind": "single", "scheduled_at": dt, "time_hhmm": hhmm}
 
     return None
 
@@ -2565,12 +2576,17 @@ def api_reminders_calendar(year: int, month: int, x_line_id_token: str | None = 
     with get_conn() as conn:
         rows = conn.execute(
             """
-            SELECT scheduled_at
+            SELECT id, content, kind, scheduled_at, weekday, time_hhmm
             FROM reminders
             WHERE user_id = %s
-              AND kind = 'single'
-              AND CAST(scheduled_at AS timestamptz) >= CAST(%s AS timestamptz)
-              AND CAST(scheduled_at AS timestamptz) < CAST(%s AS timestamptz)
+              AND (
+                kind <> 'single'
+                OR (
+                  kind = 'single'
+                  AND CAST(scheduled_at AS timestamptz) >= CAST(%s AS timestamptz)
+                  AND CAST(scheduled_at AS timestamptz) < CAST(%s AS timestamptz)
+                )
+              )
             """,
             (
                 user_id,
@@ -2580,9 +2596,17 @@ def api_reminders_calendar(year: int, month: int, x_line_id_token: str | None = 
         ).fetchall()
 
     day_map = {}
-    for row in rows:
-        d = datetime.fromisoformat(row["scheduled_at"]).astimezone(TZ).date().isoformat()
-        day_map[d] = True
+    current = start_date
+    while current < next_date:
+        for row in rows:
+            if row["kind"] == "single":
+                event_date = datetime.fromisoformat(row["scheduled_at"]).astimezone(TZ).date()
+                if event_date == current:
+                    day_map[current.isoformat()] = True
+            elif row["kind"] == "weekly":
+                if row["weekday"] == current.weekday():
+                    day_map[current.isoformat()] = True
+        current += timedelta(days=1)
 
     return {
         "days": [{"date": k, "has_items": True} for k in sorted(day_map.keys())]
@@ -2592,8 +2616,9 @@ def api_reminders_calendar(year: int, month: int, x_line_id_token: str | None = 
 @app.get("/api/reminders/by-date")
 def api_reminders_by_date(date: str, x_line_id_token: str | None = Header(default=None)):
     user_id = get_user_id_from_verified_id_token(x_line_id_token)
-    start_dt = datetime.fromisoformat(f"{date}T00:00:00+09:00")
-    end_dt = datetime.fromisoformat(f"{date}T23:59:59+09:00")
+    target_date = datetime.fromisoformat(date).date()
+    start_dt = datetime.combine(target_date, time(0, 0), tzinfo=TZ)
+    end_dt = start_dt + timedelta(days=1)
 
     with get_conn() as conn:
         rows = conn.execute(
@@ -2601,14 +2626,33 @@ def api_reminders_by_date(date: str, x_line_id_token: str | None = Header(defaul
             SELECT id, content, kind, scheduled_at, weekday, time_hhmm
             FROM reminders
             WHERE user_id = %s
-              AND kind = 'single'
-              AND CAST(scheduled_at AS timestamptz) >= CAST(%s AS timestamptz)
-              AND CAST(scheduled_at AS timestamptz) <= CAST(%s AS timestamptz)
-            ORDER BY CAST(scheduled_at AS timestamptz) ASC
+              AND (
+                kind <> 'single'
+                OR (
+                  kind = 'single'
+                  AND CAST(scheduled_at AS timestamptz) >= CAST(%s AS timestamptz)
+                  AND CAST(scheduled_at AS timestamptz) < CAST(%s AS timestamptz)
+                )
+              )
             """,
             (user_id, start_dt.isoformat(), end_dt.isoformat())
         ).fetchall()
-    return {"items": [reminder_row_to_card(x) for x in rows]}
+
+    items = []
+    for row in rows:
+        if row["kind"] == "single":
+            event_date = datetime.fromisoformat(row["scheduled_at"]).astimezone(TZ).date()
+            if event_date == target_date:
+                items.append(reminder_row_to_card(row))
+        elif row["kind"] == "weekly":
+            if row["weekday"] == target_date.weekday():
+                items.append(reminder_row_to_card(row))
+
+    def sort_key(item: dict[str, Any]) -> str:
+        return item.get("time", "00:00")
+
+    items.sort(key=sort_key)
+    return {"items": items}
 
 
 @app.delete("/api/reminders/{reminder_id}")
