@@ -496,8 +496,7 @@ def flex_today_digest_message(items: list[tuple[datetime, str]]) -> FlexMessage:
     )
     return FlexMessage(
         alt_text="今日の予定",
-        contents=FlexContainer.from_json(json.dumps(bubble.to_dict())),
-        quick_reply=menu_only_quick_reply(),
+        contents=FlexContainer.from_json(json.dumps(bubble.to_dict()))
     )
 
 
@@ -2392,7 +2391,8 @@ def handle_text_message(user_id: str, text: str, reply_token: str):
         reset_state(user_id)
         items = get_today_digest_items_for_user(user_id)
         send_reply(reply_token, [
-            flex_today_digest_message(items)
+            flex_today_digest_message(items),
+            main_menu_message()
         ])
         return
 
