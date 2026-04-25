@@ -524,7 +524,7 @@ def main_menu_message() -> FlexMessage:
                     spacing="lg",
                     margin="md",
                     contents=[
-                        menu_button("Coming Soon", "Coming Soon", primary=False),
+                        menu_button("今日の予定", "今日の予定", primary=True),
                         menu_button("保存・復元", "保存復元", primary=True, uri=LIFF_BACKUP_URL),
                     ]
                 ),
@@ -1040,6 +1040,32 @@ def get_today_occurrences(row: dict[str, Any], base_now: datetime) -> tuple[date
 
     return None
 
+
+
+def get_today_digest_items_for_user(user_id: str, base_now: datetime | None = None) -> list[tuple[datetime, str]]:
+    current = base_now or now_jst()
+    items: list[tuple[datetime, str]] = []
+
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM reminders
+            WHERE user_id = %s
+            """,
+            (user_id,)
+        ).fetchall()
+
+    for row in rows:
+        occurrence = get_today_occurrences(row, current)
+        if not occurrence:
+            continue
+
+        _, event_dt = occurrence
+        items.append((event_dt, row["content"]))
+
+    items.sort(key=lambda x: x[0])
+    return items
 
 def send_due_notifications() -> dict[str, Any]:
     current = now_jst()
@@ -2353,11 +2379,11 @@ def handle_text_message(user_id: str, text: str, reply_token: str):
         send_reply(reply_token, [main_menu_message()])
         return
     
-    if text == "Coming Soon":
+    if text in ["今日の予定", "Coming Soon"]:
         reset_state(user_id)
+        items = get_today_digest_items_for_user(user_id)
         send_reply(reply_token, [
-            text_message("ここは準備中だよ。"),
-            main_menu_message()
+            flex_today_digest_message(items)
         ])
         return
 
