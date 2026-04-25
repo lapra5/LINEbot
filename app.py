@@ -528,6 +528,15 @@ def main_menu_message() -> FlexMessage:
                         menu_button("保存・復元", "保存復元", primary=True, uri=LIFF_BACKUP_URL),
                     ]
                 ),
+                FlexBox(
+                    layout="horizontal",
+                    spacing="lg",
+                    margin="md",
+                    contents=[
+                        menu_button("Coming Soon", "Coming Soon", primary=False),
+                        menu_button("Coming Soon", "Coming Soon", primary=False),
+                    ]
+                ),
             ]
         )
     )
@@ -2379,11 +2388,20 @@ def handle_text_message(user_id: str, text: str, reply_token: str):
         send_reply(reply_token, [main_menu_message()])
         return
     
-    if text in ["今日の予定", "Coming Soon"]:
+    if text == "今日の予定":
         reset_state(user_id)
         items = get_today_digest_items_for_user(user_id)
         send_reply(reply_token, [
             flex_today_digest_message(items)
+        ])
+        return
+
+
+    if text == "Coming Soon":
+        reset_state(user_id)
+        send_reply(reply_token, [
+            text_message("ここは準備中だよ。"),
+            main_menu_message()
         ])
         return
 
