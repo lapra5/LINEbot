@@ -863,6 +863,36 @@ def save_backup(user_id: str) -> str:
         return "saved"
 
 
+def auto_backup_all_users() -> dict[str, Any]:
+    current = now_jst()
+
+    with get_conn() as conn:
+        users = conn.execute(
+            """
+            SELECT DISTINCT user_id FROM reminders
+            UNION
+            SELECT DISTINCT user_id FROM wants
+            """
+        ).fetchall()
+
+    saved = 0
+    skipped = 0
+
+    for row in users:
+        status = save_backup(row["user_id"])
+        if status == "saved":
+            saved += 1
+        else:
+            skipped += 1
+
+    return {
+        "ok": True,
+        "saved": saved,
+        "skipped": skipped,
+        "checked_at": current.isoformat(),
+    }
+
+
 def list_backups(user_id: str) -> list[dict[str, Any]]:
     with get_conn() as conn:
         return conn.execute(
@@ -2708,6 +2738,14 @@ async def run_send_due_notifications(x_cron_secret: str = Header(None)):
     if x_cron_secret != CRON_SECRET:
         raise HTTPException(status_code=401, detail="unauthorized")
     result = send_due_notifications()
+    return JSONResponse(result)
+
+
+@app.post("/jobs/auto-backup")
+async def run_auto_backup(x_cron_secret: str = Header(None)):
+    if x_cron_secret != CRON_SECRET:
+        raise HTTPException(status_code=401, detail="unauthorized")
+    result = auto_backup_all_users()
     return JSONResponse(result)
 
 
