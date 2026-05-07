@@ -2356,7 +2356,7 @@ def handle_text_message(user_id: str, text: str, reply_token: str):
             reset_auth_attempt(user_id)
             reset_state(user_id)
             send_reply(reply_token, [
-                text_message("認証できたよ！使えるようになったよ。"),
+                text_message("認証できたよ！"),
                 main_menu_message()
             ])
             return
@@ -2365,13 +2365,13 @@ def handle_text_message(user_id: str, text: str, reply_token: str):
 
         if locked_until:
             send_reply(reply_token, [
-                text_message("5回間違えたので永久ロックしたよ。")
+                text_message("連続で間違えたのでロックしたよ。しばらくしてから試してね。")
             ])
             return
 
         remain = 5 - failed_count
         send_reply(reply_token, [
-            text_message(f"パスワードが違うよ。あと {remain} 回で永久ロックされるよ。")
+            text_message(f"パスワードが違うよ。あと {remain} 回でロックされるよ。")
         ])
         return
 
