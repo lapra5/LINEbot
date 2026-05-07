@@ -1475,7 +1475,6 @@ def build_reminders_liff_html() -> str:
   <div class="wrap">
     <div class="topbar">
       <div class="title">リマインド一覧</div>
-      <button class="close-btn" id="closeBtn">×</button>
     </div>
 
     <div class="tabs">
@@ -1878,7 +1877,6 @@ def build_wants_liff_html() -> str:
   <div class="wrap">
     <div class="topbar">
       <div class="title">ほしいもの一覧</div>
-      <button class="close-btn" id="closeBtn">×</button>
     </div>
     <div id="wantList"></div>
   </div>
@@ -2156,7 +2154,6 @@ def build_backups_liff_html() -> str:
   <div class="wrap">
     <div class="topbar">
       <div class="title">バックアップ</div>
-      <button class="close-btn" id="closeBtn">×</button>
     </div>
 
     <div class="action-card">
