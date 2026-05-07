@@ -1601,8 +1601,31 @@ function withAuth(url, options = {{}}) {{
   return fetch(url, Object.assign({{}}, options, {{ headers }}));
 }}
 
+async function handleUnauthorized() {{
+  try {{
+    if (window.liff && liff.isLoggedIn()) {{
+      liff.logout();
+    }}
+  }} catch (e) {{}}
+
+  const baseUrl = window.location.origin + window.location.pathname;
+  const redirectUri = baseUrl + "?refresh=" + Date.now();
+
+  if (window.liff) {{
+    liff.login({{ redirectUri }});
+  }} else {{
+    window.location.href = redirectUri;
+  }}
+}}
+
 async function apiGet(url) {{
   const res = await withAuth(url);
+
+  if (res.status === 401) {{
+    await handleUnauthorized();
+    throw new Error("認証情報を更新しているよ。もう一度開いてね。");
+  }}
+
   if (!res.ok) throw new Error(await res.text());
   return await res.json();
 }}
@@ -1936,8 +1959,31 @@ function withAuth(url, options = {{}}) {{
   return fetch(url, Object.assign({{}}, options, {{ headers }}));
 }}
 
+async function handleUnauthorized() {{
+  try {{
+    if (window.liff && liff.isLoggedIn()) {{
+      liff.logout();
+    }}
+  }} catch (e) {{}}
+
+  const baseUrl = window.location.origin + window.location.pathname;
+  const redirectUri = baseUrl + "?refresh=" + Date.now();
+
+  if (window.liff) {{
+    liff.login({{ redirectUri }});
+  }} else {{
+    window.location.href = redirectUri;
+  }}
+}}
+
 async function apiGet(url) {{
   const res = await withAuth(url);
+
+  if (res.status === 401) {{
+    await handleUnauthorized();
+    throw new Error("認証情報を更新しているよ。もう一度開いてね。");
+  }}
+
   if (!res.ok) throw new Error(await res.text());
   return await res.json();
 }}
@@ -2185,6 +2231,11 @@ document.getElementById("saveBtn").addEventListener("click", async () => {{
     method: "POST",
     headers: {{ "x-line-id-token": idToken }}
   }});
+  if (res.status === 401) {{
+    await handleUnauthorized();
+    return;
+  }}
+
   const data = await res.json();
 
   if (data.status === "skip") {{
@@ -2208,6 +2259,11 @@ document.getElementById("restoreYes").addEventListener("click", async () => {{
     method: "POST",
     headers: {{ "x-line-id-token": idToken }}
   }});
+  if (res.status === 401) {{
+    await handleUnauthorized();
+    return;
+  }}
+
   const data = await res.json();
 
   restoreModal.classList.remove("show");
@@ -2227,6 +2283,23 @@ function escapeHtml(text) {{
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
+}}
+
+async function handleUnauthorized() {{
+  try {{
+    if (window.liff && liff.isLoggedIn()) {{
+      liff.logout();
+    }}
+  }} catch (e) {{}}
+
+  const baseUrl = window.location.origin + window.location.pathname;
+  const redirectUri = baseUrl + "?refresh=" + Date.now();
+
+  if (window.liff) {{
+    liff.login({{ redirectUri }});
+  }} else {{
+    window.location.href = redirectUri;
+  }}
 }}
 
 function showToast(message, ms) {{
@@ -2259,6 +2332,11 @@ async function loadBackups() {{
   const res = await fetch("/api/backups", {{
     headers: {{ "x-line-id-token": idToken }}
   }});
+  if (res.status === 401) {{
+    await handleUnauthorized();
+    return;
+  }}
+
   const data = await res.json();
 
   if (!data.items.length) {{
@@ -2578,19 +2656,30 @@ def healthcheck():
     return {"ok": True}
 
 
+def no_store_html(content: str) -> HTMLResponse:
+    return HTMLResponse(
+        content,
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
 @app.get("/liff/reminders", response_class=HTMLResponse)
 def liff_reminders():
-    return HTMLResponse(build_reminders_liff_html())
+    return no_store_html(build_reminders_liff_html())
 
 
 @app.get("/liff/wants", response_class=HTMLResponse)
 def liff_wants():
-    return HTMLResponse(build_wants_liff_html())
+    return no_store_html(build_wants_liff_html())
 
 
 @app.get("/liff/backups", response_class=HTMLResponse)
 def liff_backups():
-    return HTMLResponse(build_backups_liff_html())
+    return no_store_html(build_backups_liff_html())
 
 
 @app.get("/api/reminders/one-time")
