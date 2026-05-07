@@ -1538,10 +1538,6 @@ const calendarGrid = document.getElementById("calendarGrid");
 const deleteModal = document.getElementById("deleteModal");
 const deleteText = document.getElementById("deleteText");
 
-document.getElementById("closeBtn").addEventListener("click", () => {{
-  if (window.liff) liff.closeWindow();
-}});
-
 document.querySelectorAll(".tab").forEach(btn => {{
   btn.addEventListener("click", () => {{
     document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
@@ -1900,10 +1896,6 @@ const wantList = document.getElementById("wantList");
 const deleteModal = document.getElementById("deleteModal");
 const deleteText = document.getElementById("deleteText");
 
-document.getElementById("closeBtn").addEventListener("click", () => {{
-  if (window.liff) liff.closeWindow();
-}});
-
 document.getElementById("deleteNo").addEventListener("click", () => {{
   deleteModal.classList.remove("show");
   deleteTargetId = null;
@@ -2187,10 +2179,6 @@ const latestText = document.getElementById("latestText");
 const restoreModal = document.getElementById("restoreModal");
 const restoreText = document.getElementById("restoreText");
 const toast = document.getElementById("toast");
-
-document.getElementById("closeBtn").addEventListener("click", () => {{
-  if (window.liff) liff.closeWindow();
-}});
 
 document.getElementById("saveBtn").addEventListener("click", async () => {{
   const res = await fetch("/api/backups/save", {{
