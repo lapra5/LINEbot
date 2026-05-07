@@ -300,15 +300,13 @@ def reset_auth_attempt(user_id: str):
         )
 
 
-def register_auth_failure(user_id: str, lock_minutes: int = 10, max_failures: int = 3) -> tuple[int, str | None]:
+def register_auth_failure(user_id: str, max_failures: int = 5) -> tuple[int, str | None]:
     current = get_auth_attempt(user_id)
     failed_count = int(current["failed_count"]) + 1
     locked_until = None
 
     if failed_count >= max_failures:
-        locked_until_dt = now_jst() + timedelta(minutes=lock_minutes)
-        locked_until = locked_until_dt.isoformat()
-        failed_count = 0
+        locked_until = "PERMANENT"
 
     with get_conn() as conn:
         conn.execute(
@@ -328,6 +326,10 @@ def register_auth_failure(user_id: str, lock_minutes: int = 10, max_failures: in
 
 def is_auth_locked(user_id: str) -> tuple[bool, datetime | None]:
     current = get_auth_attempt(user_id)
+
+    if current["locked_until"] == "PERMANENT":
+        return True, None
+
     if not current["locked_until"]:
         return False, None
 
@@ -2363,13 +2365,13 @@ def handle_text_message(user_id: str, text: str, reply_token: str):
 
         if locked_until:
             send_reply(reply_token, [
-                text_message("3回間違えたのでロックしたよ。しばらくしてから試してね。")
+                text_message("5回間違えたので永久ロックしたよ。")
             ])
             return
 
-        remain = 3 - failed_count
+        remain = 5 - failed_count
         send_reply(reply_token, [
-            text_message(f"パスワードが違うよ。あと {remain} 回でロックされるよ。")
+            text_message(f"パスワードが違うよ。あと {remain} 回で永久ロックされるよ。")
         ])
         return
 
