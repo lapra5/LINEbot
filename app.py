@@ -1297,15 +1297,6 @@ def build_reminders_liff_html() -> str:
       font-size: 20px;
       font-weight: 700;
     }}
-    .close-btn {{
-      width: 36px;
-      height: 36px;
-      border: none;
-      border-radius: 18px;
-      background: #e9ecef;
-      font-size: 20px;
-      cursor: pointer;
-    }}
     .tabs {{
       display: flex;
       gap: 8px;
@@ -1538,6 +1529,10 @@ const calendarGrid = document.getElementById("calendarGrid");
 const deleteModal = document.getElementById("deleteModal");
 const deleteText = document.getElementById("deleteText");
 
+window.addEventListener("pageshow", () => {{
+  idToken = "";
+}});
+
 document.querySelectorAll(".tab").forEach(btn => {{
   btn.addEventListener("click", () => {{
     document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
@@ -1553,16 +1548,18 @@ document.getElementById("deleteNo").addEventListener("click", () => {{
 }});
 
 document.getElementById("deleteYes").addEventListener("click", async () => {{
-  if (!deleteTargetId) return;
-  await fetch(`/api/reminders/${{deleteTargetId}}`, {{
-    method: "DELETE",
-    headers: {{
-      "x-line-id-token": idToken
-    }}
-  }});
-  deleteModal.classList.remove("show");
-  deleteTargetId = null;
-  await loadAllReminderViews();
+  try {{
+    if (!deleteTargetId) return;
+    const res = await withAuth(`/api/reminders/${{deleteTargetId}}`, {{
+      method: "DELETE"
+    }});
+    if (!res.ok) throw new Error(await res.text());
+    deleteModal.classList.remove("show");
+    deleteTargetId = null;
+    await loadAllReminderViews();
+  }} catch (err) {{
+    window.alert(`削除に失敗しました。\n${{String(err)}}`);
+  }}
 }});
 
 document.getElementById("prevMonth").addEventListener("click", async () => {{
@@ -1596,34 +1593,71 @@ function authHeaders() {{
   }};
 }}
 
-function withAuth(url, options = {{}}) {{
-  const headers = Object.assign({{}}, options.headers || {{}}, authHeaders());
-  return fetch(url, Object.assign({{}}, options, {{ headers }}));
+function buildRedirectUri() {{
+  const url = new URL(window.location.href);
+  url.searchParams.set("refresh", Date.now().toString());
+  return url.toString();
+}}
+
+async function ensureIdToken(forceRefresh = false) {{
+  if (forceRefresh) {{
+    idToken = "";
+  }}
+
+  if (!window.liff) {{
+    throw new Error("LIFF SDK の読み込みに失敗しました。");
+  }}
+
+  if (!liff.isLoggedIn()) {{
+    liff.login({{ redirectUri: buildRedirectUri() }});
+    throw new Error("LINE ログインに移動しています。");
+  }}
+
+  idToken = liff.getIDToken() || "";
+  if (!idToken) {{
+    try {{
+      liff.logout();
+    }} catch (e) {{}}
+
+    liff.login({{ redirectUri: buildRedirectUri() }});
+    throw new Error("認証情報を更新しています。もう一度開き直してください。");
+  }}
+
+  return idToken;
 }}
 
 async function handleUnauthorized() {{
   try {{
-    if (window.liff && liff.isLoggedIn()) {{
-      liff.logout();
-    }}
-  }} catch (e) {{}}
-
-  const baseUrl = window.location.origin + window.location.pathname;
-  const redirectUri = baseUrl + "?refresh=" + Date.now();
-
-  if (window.liff) {{
-    liff.login({{ redirectUri }});
-  }} else {{
-    window.location.href = redirectUri;
+    await ensureIdToken(true);
+    return idToken;
+  }} catch (_err) {{
+    throw new Error("認証の期限が切れたため、再ログインしています。");
   }}
+}}
+
+async function withAuth(url, options = {{}}) {{
+  const token = await ensureIdToken();
+  const headers = Object.assign({{}}, options.headers || {{}}, authHeaders(), {{
+    "x-line-id-token": token
+  }});
+  let res = await fetch(url, Object.assign({{}}, options, {{ headers }}));
+
+  if (res.status === 401) {{
+    const refreshedToken = await handleUnauthorized();
+    const retryHeaders = Object.assign({{}}, options.headers || {{}}, {{
+      "x-line-id-token": refreshedToken
+    }});
+    res = await fetch(url, Object.assign({{}}, options, {{ headers: retryHeaders }}));
+  }}
+
+  return res;
 }}
 
 async function apiGet(url) {{
   const res = await withAuth(url);
 
   if (res.status === 401) {{
-    await handleUnauthorized();
-    throw new Error("認証情報を更新しているよ。もう一度開いてね。");
+    throw new Error("認証エラーが続いています。少し待ってから開き直してください。");
   }}
 
   if (!res.ok) throw new Error(await res.text());
@@ -1756,20 +1790,16 @@ async function boot() {{
     await liff.init({{ liffId: LIFF_ID }});
 
     if (!liff.isLoggedIn()) {{
-      liff.login();
+      liff.login({{ redirectUri: buildRedirectUri() }});
       return;
     }}
 
-    idToken = liff.getIDToken() || "";
-    if (!idToken) {{
-      throw new Error("IDトークンを取得できなかったよ。LIFFのscopeで openid を確認してね。");
-    }}
-
+    await ensureIdToken();
     await loadAllReminderViews();
   }} catch (err) {{
     document.body.innerHTML = `
       <div style="padding:16px;font-family:sans-serif;">
-        <h3>LIFFの読み込みに失敗したよ</h3>
+        <h3>LIFF の読み込みに失敗しました</h3>
         <pre style="white-space:pre-wrap;">${{escapeHtml(String(err))}}</pre>
       </div>
     `;
@@ -1810,15 +1840,6 @@ def build_wants_liff_html() -> str:
     .title {{
       font-size: 20px;
       font-weight: 700;
-    }}
-    .close-btn {{
-      width: 36px;
-      height: 36px;
-      border: none;
-      border-radius: 18px;
-      background: #e9ecef;
-      font-size: 20px;
-      cursor: pointer;
     }}
     .card {{
       position: relative;
@@ -1919,22 +1940,28 @@ const wantList = document.getElementById("wantList");
 const deleteModal = document.getElementById("deleteModal");
 const deleteText = document.getElementById("deleteText");
 
+window.addEventListener("pageshow", () => {{
+  idToken = "";
+}});
+
 document.getElementById("deleteNo").addEventListener("click", () => {{
   deleteModal.classList.remove("show");
   deleteTargetId = null;
 }});
 
 document.getElementById("deleteYes").addEventListener("click", async () => {{
-  if (!deleteTargetId) return;
-  await fetch(`/api/wants/${{deleteTargetId}}`, {{
-    method: "DELETE",
-    headers: {{
-      "x-line-id-token": idToken
-    }}
-  }});
-  deleteModal.classList.remove("show");
-  deleteTargetId = null;
-  await loadWants();
+  try {{
+    if (!deleteTargetId) return;
+    const res = await withAuth(`/api/wants/${{deleteTargetId}}`, {{
+      method: "DELETE"
+    }});
+    if (!res.ok) throw new Error(await res.text());
+    deleteModal.classList.remove("show");
+    deleteTargetId = null;
+    await loadWants();
+  }} catch (err) {{
+    window.alert(`削除に失敗しました。\n${{String(err)}}`);
+  }}
 }});
 
 function openDeleteModal(id, content) {{
@@ -1952,36 +1979,71 @@ function escapeHtml(text) {{
     .replace(/'/g, "&#039;");
 }}
 
-function withAuth(url, options = {{}}) {{
-  const headers = Object.assign({{}}, options.headers || {{}}, {{
-    "x-line-id-token": idToken
-  }});
-  return fetch(url, Object.assign({{}}, options, {{ headers }}));
+function buildRedirectUri() {{
+  const url = new URL(window.location.href);
+  url.searchParams.set("refresh", Date.now().toString());
+  return url.toString();
+}}
+
+async function ensureIdToken(forceRefresh = false) {{
+  if (forceRefresh) {{
+    idToken = "";
+  }}
+
+  if (!window.liff) {{
+    throw new Error("LIFF SDK の読み込みに失敗しました。");
+  }}
+
+  if (!liff.isLoggedIn()) {{
+    liff.login({{ redirectUri: buildRedirectUri() }});
+    throw new Error("LINE ログインに移動しています。");
+  }}
+
+  idToken = liff.getIDToken() || "";
+  if (!idToken) {{
+    try {{
+      liff.logout();
+    }} catch (e) {{}}
+
+    liff.login({{ redirectUri: buildRedirectUri() }});
+    throw new Error("認証情報を更新しています。もう一度開き直してください。");
+  }}
+
+  return idToken;
 }}
 
 async function handleUnauthorized() {{
   try {{
-    if (window.liff && liff.isLoggedIn()) {{
-      liff.logout();
-    }}
-  }} catch (e) {{}}
-
-  const baseUrl = window.location.origin + window.location.pathname;
-  const redirectUri = baseUrl + "?refresh=" + Date.now();
-
-  if (window.liff) {{
-    liff.login({{ redirectUri }});
-  }} else {{
-    window.location.href = redirectUri;
+    await ensureIdToken(true);
+    return idToken;
+  }} catch (_err) {{
+    throw new Error("認証の期限が切れたため、再ログインしています。");
   }}
+}}
+
+async function withAuth(url, options = {{}}) {{
+  const token = await ensureIdToken();
+  const headers = Object.assign({{}}, options.headers || {{}}, {{
+    "x-line-id-token": token
+  }});
+  let res = await fetch(url, Object.assign({{}}, options, {{ headers }}));
+
+  if (res.status === 401) {{
+    const refreshedToken = await handleUnauthorized();
+    const retryHeaders = Object.assign({{}}, options.headers || {{}}, {{
+      "x-line-id-token": refreshedToken
+    }});
+    res = await fetch(url, Object.assign({{}}, options, {{ headers: retryHeaders }}));
+  }}
+
+  return res;
 }}
 
 async function apiGet(url) {{
   const res = await withAuth(url);
 
   if (res.status === 401) {{
-    await handleUnauthorized();
-    throw new Error("認証情報を更新しているよ。もう一度開いてね。");
+    throw new Error("認証エラーが続いています。少し待ってから開き直してください。");
   }}
 
   if (!res.ok) throw new Error(await res.text());
@@ -2014,20 +2076,16 @@ async function boot() {{
     await liff.init({{ liffId: LIFF_ID }});
 
     if (!liff.isLoggedIn()) {{
-      liff.login();
+      liff.login({{ redirectUri: buildRedirectUri() }});
       return;
     }}
 
-    idToken = liff.getIDToken() || "";
-    if (!idToken) {{
-      throw new Error("IDトークンを取得できなかったよ。LIFFのscopeで openid を確認してね。");
-    }}
-
+    await ensureIdToken();
     await loadWants();
   }} catch (err) {{
     document.body.innerHTML = `
       <div style="padding:16px;font-family:sans-serif;">
-        <h3>LIFFの読み込みに失敗したよ</h3>
+        <h3>LIFF の読み込みに失敗しました</h3>
         <pre style="white-space:pre-wrap;">${{escapeHtml(String(err))}}</pre>
       </div>
     `;
@@ -2068,15 +2126,6 @@ def build_backups_liff_html() -> str:
     .title {{
       font-size: 20px;
       font-weight: 700;
-    }}
-    .close-btn {{
-      width: 36px;
-      height: 36px;
-      border: none;
-      border-radius: 18px;
-      background: #e9ecef;
-      font-size: 20px;
-      cursor: pointer;
     }}
     .action-card, .card {{
       background: #fff;
@@ -2226,25 +2275,32 @@ const restoreModal = document.getElementById("restoreModal");
 const restoreText = document.getElementById("restoreText");
 const toast = document.getElementById("toast");
 
+window.addEventListener("pageshow", () => {{
+  idToken = "";
+}});
+
 document.getElementById("saveBtn").addEventListener("click", async () => {{
-  const res = await fetch("/api/backups/save", {{
-    method: "POST",
-    headers: {{ "x-line-id-token": idToken }}
-  }});
-  if (res.status === 401) {{
-    await handleUnauthorized();
-    return;
+  try {{
+    const res = await withAuth("/api/backups/save", {{
+      method: "POST"
+    }});
+    if (res.status === 401) {{
+      throw new Error("認証エラーが続いています。少し待ってから開き直してください。");
+    }}
+    if (!res.ok) throw new Error(await res.text());
+
+    const data = await res.json();
+
+    if (data.status === "skip") {{
+      showToast("保存できるデータがまだないよ。", 2200);
+      return;
+    }}
+
+    showToast("保存成功", 1800);
+    await loadBackups();
+  }} catch (err) {{
+    showToast(`保存に失敗しました: ${{String(err)}}`, 2800);
   }}
-
-  const data = await res.json();
-
-  if (data.status === "skip") {{
-    showToast("保存できるデータがまだないよ。", 2200);
-    return;
-  }}
-
-  showToast("保存成功", 1800);
-  await loadBackups();
 }});
 
 document.getElementById("restoreNo").addEventListener("click", () => {{
@@ -2253,26 +2309,29 @@ document.getElementById("restoreNo").addEventListener("click", () => {{
 }});
 
 document.getElementById("restoreYes").addEventListener("click", async () => {{
-  if (!restoreTargetId) return;
+  try {{
+    if (!restoreTargetId) return;
 
-  const res = await fetch(`/api/backups/restore/${{restoreTargetId}}`, {{
-    method: "POST",
-    headers: {{ "x-line-id-token": idToken }}
-  }});
-  if (res.status === 401) {{
-    await handleUnauthorized();
-    return;
-  }}
+    const res = await withAuth(`/api/backups/restore/${{restoreTargetId}}`, {{
+      method: "POST"
+    }});
+    if (res.status === 401) {{
+      throw new Error("認証エラーが続いています。少し待ってから開き直してください。");
+    }}
+    if (!res.ok) throw new Error(await res.text());
 
-  const data = await res.json();
+    const data = await res.json();
 
-  restoreModal.classList.remove("show");
-  restoreTargetId = null;
+    restoreModal.classList.remove("show");
+    restoreTargetId = null;
 
-  if (data.ok) {{
-    showToast("復元成功", 1800);
-  }} else {{
-    showToast("復元に失敗したよ。", 2200);
+    if (data.ok) {{
+      showToast("復元成功", 1800);
+    }} else {{
+      showToast("復元に失敗したよ。", 2200);
+    }}
+  }} catch (err) {{
+    showToast(`復元に失敗しました: ${{String(err)}}`, 2800);
   }}
 }});
 
@@ -2285,21 +2344,64 @@ function escapeHtml(text) {{
     .replace(/'/g, "&#039;");
 }}
 
+function buildRedirectUri() {{
+  const url = new URL(window.location.href);
+  url.searchParams.set("refresh", Date.now().toString());
+  return url.toString();
+}}
+
+async function ensureIdToken(forceRefresh = false) {{
+  if (forceRefresh) {{
+    idToken = "";
+  }}
+
+  if (!window.liff) {{
+    throw new Error("LIFF SDK の読み込みに失敗しました。");
+  }}
+
+  if (!liff.isLoggedIn()) {{
+    liff.login({{ redirectUri: buildRedirectUri() }});
+    throw new Error("LINE ログインに移動しています。");
+  }}
+
+  idToken = liff.getIDToken() || "";
+  if (!idToken) {{
+    try {{
+      liff.logout();
+    }} catch (e) {{}}
+
+    liff.login({{ redirectUri: buildRedirectUri() }});
+    throw new Error("認証情報を更新しています。もう一度開き直してください。");
+  }}
+
+  return idToken;
+}}
+
 async function handleUnauthorized() {{
   try {{
-    if (window.liff && liff.isLoggedIn()) {{
-      liff.logout();
-    }}
-  }} catch (e) {{}}
-
-  const baseUrl = window.location.origin + window.location.pathname;
-  const redirectUri = baseUrl + "?refresh=" + Date.now();
-
-  if (window.liff) {{
-    liff.login({{ redirectUri }});
-  }} else {{
-    window.location.href = redirectUri;
+    await ensureIdToken(true);
+    return idToken;
+  }} catch (_err) {{
+    throw new Error("認証の期限が切れたため、再ログインしています。");
   }}
+}}
+
+async function withAuth(url, options = {{}}) {{
+  const token = await ensureIdToken();
+  const headers = Object.assign({{}}, options.headers || {{}}, {{
+    "x-line-id-token": token
+  }});
+  let res = await fetch(url, Object.assign({{}}, options, {{ headers }}));
+
+  if (res.status === 401) {{
+    const refreshedToken = await handleUnauthorized();
+    const retryHeaders = Object.assign({{}}, options.headers || {{}}, {{
+      "x-line-id-token": refreshedToken
+    }});
+    res = await fetch(url, Object.assign({{}}, options, {{ headers: retryHeaders }}));
+  }}
+
+  return res;
 }}
 
 function showToast(message, ms) {{
@@ -2329,13 +2431,11 @@ function openRestoreModal(id, createdAt) {{
 }}
 
 async function loadBackups() {{
-  const res = await fetch("/api/backups", {{
-    headers: {{ "x-line-id-token": idToken }}
-  }});
+  const res = await withAuth("/api/backups");
   if (res.status === 401) {{
-    await handleUnauthorized();
-    return;
+    throw new Error("認証エラーが続いています。少し待ってから開き直してください。");
   }}
+  if (!res.ok) throw new Error(await res.text());
 
   const data = await res.json();
 
@@ -2368,20 +2468,16 @@ async function boot() {{
     await liff.init({{ liffId: LIFF_ID }});
 
     if (!liff.isLoggedIn()) {{
-      liff.login();
+      liff.login({{ redirectUri: buildRedirectUri() }});
       return;
     }}
 
-    idToken = liff.getIDToken() || "";
-    if (!idToken) {{
-      throw new Error("IDトークンを取得できなかったよ。LIFFのscopeで openid を確認してね。");
-    }}
-
+    await ensureIdToken();
     await loadBackups();
   }} catch (err) {{
     document.body.innerHTML = `
       <div style="padding:16px;font-family:sans-serif;">
-        <h3>LIFFの読み込みに失敗したよ</h3>
+        <h3>LIFF の読み込みに失敗しました</h3>
         <pre style="white-space:pre-wrap;">${{escapeHtml(String(err))}}</pre>
       </div>
     `;
