@@ -80,18 +80,20 @@ def format_weekly_datetime(weekday: int | None, hhmm: str | None) -> str:
     return f"毎週 {weekday_text} {hhmm or '時刻未設定'}"
 
 
-def build_reminder_lines() -> list[str]:
+def build_reminder_lines(line_user_id: str) -> list[str]:
     with get_conn() as conn:
         rows = conn.execute(
             """
             SELECT id, content, kind, scheduled_at, weekday, time_hhmm, created_at
             FROM reminders
+            WHERE user_id = %s
             ORDER BY
                 CASE WHEN kind = 'single' THEN 0 ELSE 1 END,
                 CAST(scheduled_at AS timestamptz) NULLS LAST,
                 created_at ASC NULLS LAST,
                 id ASC
-            """
+            """,
+            (line_user_id,)
         ).fetchall()
 
     if not rows:
@@ -260,14 +262,19 @@ class MenuView(discord.ui.View):
     ) -> None:
         await interaction.response.defer(ephemeral=True)
 
-        lines = build_reminder_lines()
+        link = get_account_link_by_discord_user_id(str(interaction.user.id))
+        if not link:
+            await interaction.followup.send(
+                "LINEアカウントと連携されていません。\nLINEで『Discord連携』を実行してね。",
+                ephemeral=True,
+            )
+            return
+
+        lines = build_reminder_lines(link["line_user_id"])
         chunks = split_message_lines(lines)
 
-        for index, chunk in enumerate(chunks):
-            if index == 0:
-                await interaction.followup.send(chunk, ephemeral=True)
-            else:
-                await interaction.followup.send(chunk, ephemeral=True)
+        for chunk in chunks:
+            await interaction.followup.send(chunk, ephemeral=True)
 
     @discord.ui.button(
         label="ほしいもの",
