@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import secrets
 from contextlib import contextmanager
 from datetime import datetime, date, time, timedelta
 from typing import Any
@@ -172,9 +173,81 @@ def init_db():
         """)
 
         cur.execute("""
+        CREATE TABLE IF NOT EXISTS account_links (
+            line_user_id TEXT PRIMARY KEY,
+            discord_user_id TEXT UNIQUE NOT NULL,
+            linked_at TEXT NOT NULL
+        )
+        """)
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS account_link_codes (
+            code TEXT PRIMARY KEY,
+            line_user_id TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            used_at TEXT,
+            created_at TEXT NOT NULL
+        )
+        """)
+
+        cur.execute("""
         ALTER TABLE reminders
         ADD COLUMN IF NOT EXISTS last_exact_notice_date TEXT
         """)
+
+
+def get_account_link_by_line_user_id(line_user_id: str) -> dict[str, Any] | None:
+    with get_conn() as conn:
+        return conn.execute(
+            """
+            SELECT line_user_id, discord_user_id, linked_at
+            FROM account_links
+            WHERE line_user_id = %s
+            """,
+            (line_user_id,)
+        ).fetchone()
+
+
+def delete_account_link_by_line_user_id(line_user_id: str) -> bool:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "DELETE FROM account_links WHERE line_user_id = %s",
+            (line_user_id,)
+        )
+        return cur.rowcount > 0
+
+
+def issue_account_link_code(line_user_id: str) -> str:
+    current = now_jst()
+    expires_at = (current + timedelta(minutes=10)).isoformat()
+
+    with get_conn() as conn:
+        conn.execute(
+            """
+            DELETE FROM account_link_codes
+            WHERE line_user_id = %s
+              AND used_at IS NULL
+            """,
+            (line_user_id,)
+        )
+
+        while True:
+            code = f"{secrets.randbelow(1000000):06d}"
+            exists = conn.execute(
+                "SELECT code FROM account_link_codes WHERE code = %s",
+                (code,)
+            ).fetchone()
+            if exists:
+                continue
+
+            conn.execute(
+                """
+                INSERT INTO account_link_codes (code, line_user_id, expires_at, used_at, created_at)
+                VALUES (%s, %s, %s, NULL, %s)
+                """,
+                (code, line_user_id, expires_at, current.isoformat())
+            )
+            return code
 
 
 def get_state(user_id: str) -> dict[str, Any]:
@@ -534,7 +607,7 @@ def main_menu_message() -> FlexMessage:
                     spacing="lg",
                     margin="md",
                     contents=[
-                        menu_button("Coming Soon", "Coming Soon", primary=False),
+                        menu_button("Discord連携", "Discord連携", primary=True),
                         menu_button("Coming Soon", "Coming Soon", primary=False),
                     ]
                 ),
@@ -2493,6 +2566,7 @@ boot();
 
 def handle_text_message(user_id: str, text: str, reply_token: str):
     state = get_state(user_id)
+    normalized_text = text.strip()
 
     if not is_authorized_user(user_id):
         locked, _locked_until = is_auth_locked(user_id)
@@ -2510,7 +2584,7 @@ def handle_text_message(user_id: str, text: str, reply_token: str):
             ])
             return
 
-        if text.strip() == BOT_PASSWORD:
+        if normalized_text == BOT_PASSWORD:
             authorize_user(user_id)
             reset_auth_attempt(user_id)
             reset_state(user_id)
@@ -2558,7 +2632,45 @@ def handle_text_message(user_id: str, text: str, reply_token: str):
         return
 
 
-    if text == "Coming Soon":
+    if normalized_text == "Discord連携":
+        reset_state(user_id)
+        linked = get_account_link_by_line_user_id(user_id)
+        if linked:
+            send_reply(reply_token, [
+                text_message("すでにDiscordと連携済みだよ。\n解除する場合は「Discord連携解除」と送ってね。"),
+                main_menu_message()
+            ])
+            return
+
+        code = issue_account_link_code(user_id)
+        send_reply(reply_token, [
+            text_message(
+                "Discord連携コードを発行したよ。\n\n"
+                "Discordで次のコマンドを入力してね。\n\n"
+                f"/link code:{code}\n\n"
+                "有効期限は10分だよ。"
+            ),
+            main_menu_message()
+        ])
+        return
+
+    if text == "Discord連携解除":
+        reset_state(user_id)
+        deleted = delete_account_link_by_line_user_id(user_id)
+        if deleted:
+            send_reply(reply_token, [
+                text_message("Discord連携を解除したよ。"),
+                main_menu_message()
+            ])
+            return
+
+        send_reply(reply_token, [
+            text_message("まだDiscord連携されていないよ。"),
+            main_menu_message()
+        ])
+        return
+
+    if normalized_text == "Coming Soon":
         reset_state(user_id)
         send_reply(reply_token, [
             text_message("ここは準備中だよ。"),
