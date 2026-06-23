@@ -670,49 +670,49 @@ class WantModal(discord.ui.Modal, title="ほしいもの追加"):
         )
 
 
-class BackupRestoreModal(discord.ui.Modal, title="バックアップ復元"):
-    def __init__(self) -> None:
-        super().__init__()
-        self.number_input = discord.ui.TextInput(
-            label="復元する番号",
-            placeholder="例：1",
-            required=True,
-            max_length=10,
-        )
-        self.add_item(self.number_input)
-
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer(ephemeral=True)
-
-        link = get_account_link_by_discord_user_id(str(interaction.user.id))
-        if not link:
-            await interaction.followup.send(
-                "LINEアカウントと連携されていません。\nLINEで『Discord連携』を実行してね。",
-                ephemeral=True,
+class BackupRestoreSelect(discord.ui.Select):
+    def __init__(self, owner_discord_user_id: str, line_user_id: str, backups: list[dict[str, Any]]) -> None:
+        options: list[discord.SelectOption] = []
+        for index, backup in enumerate(backups):
+            label = format_backup_created_at(backup["created_at"])
+            if index == 0:
+                label = f"{label}（最新）"
+            options.append(
+                discord.SelectOption(
+                    label=label[:100],
+                    value=str(backup["id"]),
+                )
             )
+
+        super().__init__(
+            placeholder="復元するバックアップを選んでね",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="discord_backup_restore_select",
+        )
+        self.owner_discord_user_id = owner_discord_user_id
+        self.line_user_id = line_user_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if str(interaction.user.id) != self.owner_discord_user_id:
+            await interaction.response.send_message("この復元メニューは操作できないよ。", ephemeral=True)
             return
 
-        raw = str(self.number_input.value).strip()
-        if not raw.isdigit():
-            await interaction.followup.send("復元する番号を数字で入力してね。", ephemeral=True)
-            return
-
-        index = int(raw)
-        backups = list_backups(link["line_user_id"])
-        if index < 1 or index > len(backups):
-            await interaction.followup.send("その番号のバックアップは見つからないよ。", ephemeral=True)
-            return
-
-        target = backups[index - 1]
-        restored = restore_backup(link["line_user_id"], int(target["id"]))
+        await interaction.response.defer(ephemeral=True)
+        backup_id = int(self.values[0])
+        restored = restore_backup(self.line_user_id, backup_id)
         if not restored:
             await interaction.followup.send("バックアップの復元に失敗したよ。", ephemeral=True)
             return
 
-        await interaction.followup.send(
-            f"OK！バックアップ {index} を復元したよ！",
-            ephemeral=True,
-        )
+        await interaction.followup.send("OK！バックアップを復元したよ！", ephemeral=True)
+
+
+class BackupRestoreView(discord.ui.View):
+    def __init__(self, owner_discord_user_id: str, line_user_id: str, backups: list[dict[str, Any]]) -> None:
+        super().__init__(timeout=300)
+        self.add_item(BackupRestoreSelect(owner_discord_user_id, line_user_id, backups))
 
 
 class WantsMenuView(discord.ui.View):
@@ -867,7 +867,19 @@ class BackupMenuView(discord.ui.View):
                 )
             return
 
-        await interaction.response.send_modal(BackupRestoreModal())
+        backups = list_backups(link["line_user_id"])[:5]
+        if not backups:
+            if interaction.response.is_done():
+                await interaction.followup.send("バックアップはありません", ephemeral=True)
+            else:
+                await interaction.response.send_message("バックアップはありません", ephemeral=True)
+            return
+
+        await interaction.response.send_message(
+            "復元するバックアップを選んでね。",
+            view=BackupRestoreView(str(interaction.user.id), link["line_user_id"], backups),
+            ephemeral=True,
+        )
 
     @discord.ui.button(
         label="戻る",
