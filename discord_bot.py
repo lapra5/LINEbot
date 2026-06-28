@@ -469,9 +469,9 @@ def build_want_lines(line_user_id: str) -> list[str]:
         ).fetchall()
 
     if not rows:
-        return ["ほしいものはありません"]
+        return ["メモはありません"]
 
-    lines = ["【ほしいもの一覧】", ""]
+    lines = ["【メモ一覧】", ""]
     for index, row in enumerate(rows, start=1):
         lines.append(f"{index}. {row['content']}")
     return lines
@@ -674,12 +674,12 @@ class ReminderModal(discord.ui.Modal, title="リマインダー追加"):
         )
 
 
-class WantModal(discord.ui.Modal, title="ほしいもの追加"):
+class WantModal(discord.ui.Modal, title="メモ追加"):
     def __init__(self) -> None:
         super().__init__()
         self.want_input = discord.ui.TextInput(
-            label="ほしいもの",
-            placeholder="例：参考書、イヤホン",
+            label="メモ",
+            placeholder="例：買うもの、あとで確認すること",
             required=True,
             max_length=200,
         )
@@ -699,7 +699,7 @@ class WantModal(discord.ui.Modal, title="ほしいもの追加"):
         content = str(self.want_input.value).strip()
         create_want(link["line_user_id"], content)
         await interaction.followup.send(
-            f"OK！『{content}』をほしいものに追加したよ！",
+            "メモを保存したよ！",
             ephemeral=True,
         )
 
@@ -883,6 +883,7 @@ class WantsMenuView(discord.ui.View):
         label="追加",
         style=discord.ButtonStyle.primary,
         custom_id="discord_wants_add",
+        row=0,
     )
     async def add_button(
         self,
@@ -909,6 +910,7 @@ class WantsMenuView(discord.ui.View):
         label="一覧",
         style=discord.ButtonStyle.secondary,
         custom_id="discord_wants_list",
+        row=0,
     )
     async def list_button(
         self,
@@ -931,9 +933,58 @@ class WantsMenuView(discord.ui.View):
             await interaction.followup.send(chunk, ephemeral=True)
 
     @discord.ui.button(
+        label="編集",
+        style=discord.ButtonStyle.secondary,
+        custom_id="discord_wants_edit",
+        row=1,
+    )
+    async def edit_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.send_message(
+            "編集機能は準備中だよ。",
+            ephemeral=True,
+        )
+
+    @discord.ui.button(
+        label="削除",
+        style=discord.ButtonStyle.danger,
+        custom_id="discord_wants_delete",
+        row=1,
+    )
+    async def delete_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.send_message(
+            "削除機能は準備中だよ。",
+            ephemeral=True,
+        )
+
+    @discord.ui.button(
+        label="リマインダー化",
+        style=discord.ButtonStyle.primary,
+        custom_id="discord_wants_reminder",
+        row=2,
+    )
+    async def reminder_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.send_message(
+            "メモからリマインダーを作る機能は準備中だよ。",
+            ephemeral=True,
+        )
+
+    @discord.ui.button(
         label="戻る",
         style=discord.ButtonStyle.success,
         custom_id="discord_wants_back",
+        row=2,
     )
     async def back_button(
         self,
@@ -1131,7 +1182,7 @@ class MenuView(discord.ui.View):
         )
 
     @discord.ui.button(
-        label="ほしいもの",
+        label="📝 メモ",
         style=discord.ButtonStyle.success,
         custom_id="discord_menu_want",
     )
@@ -1141,7 +1192,7 @@ class MenuView(discord.ui.View):
         button: discord.ui.Button,
     ) -> None:
         await interaction.response.send_message(
-            "ほしいものメニューだよ。操作を選んでね。",
+            "📝 メモ",
             view=WantsMenuView(),
             ephemeral=True,
         )
