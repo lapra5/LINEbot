@@ -297,6 +297,48 @@ def build_reminder_list_chunks(line_user_id: str) -> list[str]:
     return split_message_lines(build_reminder_lines(line_user_id))
 
 
+async def restore_reminder_delete_list(
+    interaction: discord.Interaction,
+    line_user_id: str,
+) -> None:
+    reminders = get_reminders_for_user(line_user_id)
+    if not reminders:
+        await interaction.edit_original_response(
+            content="リマインダーはありません",
+            view=ReminderListBackOnlyView(),
+        )
+        return
+
+    chunks = build_reminder_list_chunks(line_user_id)
+    for chunk in chunks[:-1]:
+        await interaction.followup.send(chunk, ephemeral=True)
+
+    await interaction.edit_original_response(
+        content=chunks[-1],
+        view=ReminderListView(),
+    )
+
+
+class SuccessBackToMenuView(discord.ui.View):
+    def __init__(self) -> None:
+        super().__init__(timeout=300)
+
+    @discord.ui.button(
+        label="戻る",
+        style=discord.ButtonStyle.secondary,
+        custom_id="discord_success_back_to_menu",
+    )
+    async def back_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(
+            content="使いたい機能を選んでください。",
+            view=MenuView(),
+        )
+
+
 def split_message_lines(lines: list[str], max_length: int = 1900) -> list[str]:
     chunks: list[str] = []
     current = ""
@@ -445,6 +487,44 @@ def create_reminder(line_user_id: str, content: str, parsed: dict[str, Any]) -> 
         )
 
 
+async def save_reminder_from_parsed_input(
+    interaction: discord.Interaction,
+    line_user_id: str,
+    content: str,
+    datetime_text: str,
+) -> None:
+    parsed = parse_datetime_input(datetime_text)
+
+    if not parsed or parsed.get("error") == "time_required":
+        await interaction.followup.send(
+            "日時がうまく読めなかったよ。例：明日 10:00、6/20 18:00、3分後",
+            ephemeral=True,
+        )
+        return
+
+    if parsed.get("error") == "past_datetime":
+        await interaction.followup.send("その日時はもう過ぎているよ。", ephemeral=True)
+        return
+
+    create_reminder(line_user_id, content, parsed)
+
+    if parsed["kind"] == "single":
+        when_text = parsed["scheduled_at"].astimezone(TZ).strftime("%Y/%m/%d %H:%M")
+        await interaction.followup.send(
+            f"OK！『{content}』を {when_text} に通知するね！",
+            ephemeral=True,
+            view=SuccessBackToMenuView(),
+        )
+        return
+
+    weekly_text = format_weekly_datetime(parsed["weekday"], parsed["time_hhmm"])
+    await interaction.followup.send(
+        f"OK！『{content}』を {weekly_text} に通知するね！",
+        ephemeral=True,
+        view=SuccessBackToMenuView(),
+    )
+
+
 def create_want(line_user_id: str, content: str) -> None:
     with get_conn() as conn:
         conn.execute(
@@ -475,6 +555,48 @@ def build_want_lines(line_user_id: str) -> list[str]:
     for index, row in enumerate(rows, start=1):
         lines.append(f"{index}. {row['content']}")
     return lines
+
+
+def get_wants_for_user(line_user_id: str, limit: int = 25) -> list[dict[str, Any]]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, content
+            FROM wants
+            WHERE user_id = %s
+            ORDER BY created_at DESC
+            LIMIT %s
+            """,
+            (line_user_id, limit),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def delete_want_for_user(line_user_id: str, want_id: int) -> bool:
+    with get_conn() as conn:
+        deleted = conn.execute(
+            "DELETE FROM wants WHERE id = %s AND user_id = %s",
+            (want_id, line_user_id),
+        )
+    return deleted.rowcount > 0
+
+
+def update_want_for_user(line_user_id: str, want_id: int, content: str) -> bool:
+    with get_conn() as conn:
+        updated = conn.execute(
+            "UPDATE wants SET content = %s WHERE id = %s AND user_id = %s",
+            (content, want_id, line_user_id),
+        )
+    return updated.rowcount > 0
+
+
+def build_want_delete_label(want: dict[str, Any]) -> str:
+    content = str(want.get("content", "")).strip() or "内容なし"
+    return content.replace("\n", " ")[:100]
+
+
+def build_want_edit_label(want: dict[str, Any]) -> str:
+    return build_want_delete_label(want)
 
 
 def save_backup(line_user_id: str) -> str:
@@ -644,33 +766,11 @@ class ReminderModal(discord.ui.Modal, title="リマインダー追加"):
             return
 
         content = str(self.content_input.value).strip()
-        parsed = parse_datetime_input(str(self.datetime_input.value))
-
-        if not parsed or parsed.get("error") == "time_required":
-            await interaction.followup.send(
-                "日時がうまく読めなかったよ。例：明日 10:00、6/20 18:00、3分後",
-                ephemeral=True,
-            )
-            return
-
-        if parsed.get("error") == "past_datetime":
-            await interaction.followup.send("その日時はもう過ぎているよ。", ephemeral=True)
-            return
-
-        create_reminder(link["line_user_id"], content, parsed)
-
-        if parsed["kind"] == "single":
-            when_text = parsed["scheduled_at"].astimezone(TZ).strftime("%Y/%m/%d %H:%M")
-            await interaction.followup.send(
-                f"OK！『{content}』を {when_text} に通知するね！",
-                ephemeral=True,
-            )
-            return
-
-        weekly_text = format_weekly_datetime(parsed["weekday"], parsed["time_hhmm"])
-        await interaction.followup.send(
-            f"OK！『{content}』を {weekly_text} に通知するね！",
-            ephemeral=True,
+        await save_reminder_from_parsed_input(
+            interaction,
+            link["line_user_id"],
+            content,
+            str(self.datetime_input.value),
         )
 
 
@@ -701,6 +801,80 @@ class WantModal(discord.ui.Modal, title="メモ追加"):
         await interaction.followup.send(
             "メモを保存したよ！",
             ephemeral=True,
+            view=SuccessBackToMenuView(),
+        )
+
+
+class WantEditModal(discord.ui.Modal, title="メモ編集"):
+    def __init__(
+        self,
+        owner_discord_user_id: str,
+        line_user_id: str,
+        want_id: int,
+        current_content: str,
+    ) -> None:
+        super().__init__()
+        self.owner_discord_user_id = owner_discord_user_id
+        self.line_user_id = line_user_id
+        self.want_id = want_id
+        self.want_input = discord.ui.TextInput(
+            label="メモ",
+            default=current_content[:200],
+            required=True,
+            max_length=200,
+        )
+        self.add_item(self.want_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if str(interaction.user.id) != self.owner_discord_user_id:
+            await interaction.response.send_message("このメニューは操作できないよ。", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        content = str(self.want_input.value).strip()
+        updated = update_want_for_user(self.line_user_id, self.want_id, content)
+        if not updated:
+            await interaction.followup.send("更新対象が見つからなかったよ。", ephemeral=True)
+            return
+
+        await interaction.followup.send(
+            "メモを更新したよ！",
+            ephemeral=True,
+            view=SuccessBackToMenuView(),
+        )
+
+
+class WantReminderDatetimeModal(discord.ui.Modal, title="リマインダー日時"):
+    def __init__(
+        self,
+        owner_discord_user_id: str,
+        line_user_id: str,
+        want_content: str,
+    ) -> None:
+        super().__init__()
+        self.owner_discord_user_id = owner_discord_user_id
+        self.line_user_id = line_user_id
+        self.want_content = want_content
+        self.datetime_input = discord.ui.TextInput(
+            label="日時",
+            placeholder="例：明日 10:00 / 3分後 / 6/20 18:00 / 毎週 月曜日 08:00",
+            required=True,
+            max_length=100,
+        )
+        self.add_item(self.datetime_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if str(interaction.user.id) != self.owner_discord_user_id:
+            await interaction.response.send_message("このメニューは操作できないよ。", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        await save_reminder_from_parsed_input(
+            interaction,
+            self.line_user_id,
+            self.want_content,
+            str(self.datetime_input.value),
         )
 
 
@@ -740,7 +914,11 @@ class BackupRestoreSelect(discord.ui.Select):
             await interaction.followup.send("バックアップの復元に失敗したよ。", ephemeral=True)
             return
 
-        await interaction.followup.send("OK！バックアップを復元したよ！", ephemeral=True)
+        await interaction.followup.send(
+            "OK！バックアップを復元したよ！",
+            ephemeral=True,
+            view=SuccessBackToMenuView(),
+        )
 
 
 class BackupRestoreView(discord.ui.View):
@@ -782,12 +960,8 @@ class ReminderDeleteSelect(discord.ui.Select):
             await interaction.followup.send("削除対象が見つからなかったよ。", ephemeral=True)
             return
 
-        deleted = delete_reminder_for_user(self.line_user_id, reminder_id)
-        if not deleted:
-            await interaction.followup.send("削除対象が見つからなかったよ。", ephemeral=True)
-            return
-
-        await interaction.followup.send("リマインダーを削除したよ。", ephemeral=True)
+        if isinstance(self.view, ReminderDeleteSelectView):
+            self.view.selected_reminder_id = reminder_id
 
 
 class ReminderDeleteSelectView(discord.ui.View):
@@ -795,7 +969,41 @@ class ReminderDeleteSelectView(discord.ui.View):
         super().__init__(timeout=300)
         self.owner_discord_user_id = owner_discord_user_id
         self.line_user_id = line_user_id
+        self.selected_reminder_id: int | None = None
         self.add_item(ReminderDeleteSelect(owner_discord_user_id, line_user_id, reminders))
+
+    @discord.ui.button(
+        label="削除",
+        style=discord.ButtonStyle.danger,
+        custom_id="discord_reminder_delete_confirm",
+    )
+    async def delete_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        if str(interaction.user.id) != self.owner_discord_user_id:
+            await interaction.response.send_message("このメニューは操作できないよ。", ephemeral=True)
+            return
+
+        if self.selected_reminder_id is None:
+            await interaction.response.send_message("削除する項目を選んでね。", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        deleted = delete_reminder_for_user(self.line_user_id, self.selected_reminder_id)
+        if not deleted:
+            await interaction.edit_original_response(
+                content="削除対象が見つからなかったよ。",
+                view=None,
+            )
+            return
+
+        await interaction.edit_original_response(
+            content="リマインダーを削除したよ。",
+            view=None,
+        )
 
     @discord.ui.button(
         label="キャンセル",
@@ -812,34 +1020,30 @@ class ReminderDeleteSelectView(discord.ui.View):
             return
 
         await interaction.response.defer(ephemeral=True)
+        await restore_reminder_delete_list(interaction, self.line_user_id)
 
-        link = get_account_link_by_discord_user_id(str(interaction.user.id))
-        if not link:
-            await interaction.edit_original_response(
-                content="LINEアカウントと連携されていません。\nLINEで『Discord連携』を実行してね。",
-                view=None,
-            )
-            return
 
-        reminders = get_reminders_for_user(link["line_user_id"])
-        if not reminders:
-            await interaction.edit_original_response(
-                content="リマインダーはありません",
-                view=None,
-            )
-            return
+class ReminderListBackOnlyView(discord.ui.View):
+    def __init__(self) -> None:
+        super().__init__(timeout=300)
 
-        chunks = build_reminder_list_chunks(link["line_user_id"])
-        for chunk in chunks[:-1]:
-            await interaction.followup.send(chunk, ephemeral=True)
-
-        await interaction.edit_original_response(
-            content=chunks[-1],
-            view=ReminderDeleteOpenView(),
+    @discord.ui.button(
+        label="戻る",
+        style=discord.ButtonStyle.secondary,
+        custom_id="discord_reminder_list_back",
+    )
+    async def back_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(
+            content="使いたい機能を選んでください。",
+            view=MenuView(),
         )
 
 
-class ReminderDeleteOpenView(discord.ui.View):
+class ReminderListView(discord.ui.View):
     def __init__(self) -> None:
         super().__init__(timeout=300)
 
@@ -874,6 +1078,318 @@ class ReminderDeleteOpenView(discord.ui.View):
             ephemeral=True,
         )
 
+    @discord.ui.button(
+        label="戻る",
+        style=discord.ButtonStyle.secondary,
+        custom_id="discord_reminder_list_back",
+    )
+    async def back_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(
+            content="使いたい機能を選んでください。",
+            view=MenuView(),
+        )
+
+
+class WantDeleteSelect(discord.ui.Select):
+    def __init__(self, owner_discord_user_id: str, line_user_id: str, wants: list[dict[str, Any]]) -> None:
+        options = [
+            discord.SelectOption(
+                label=build_want_delete_label(want),
+                value=str(want["id"]),
+            )
+            for want in wants[:25]
+        ]
+
+        super().__init__(
+            placeholder="削除するメモを選んでね",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="discord_memo_delete_select",
+        )
+        self.owner_discord_user_id = owner_discord_user_id
+        self.line_user_id = line_user_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if str(interaction.user.id) != self.owner_discord_user_id:
+            await interaction.response.send_message("このメニューは操作できないよ。", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            want_id = int(self.values[0])
+        except (TypeError, ValueError):
+            await interaction.followup.send("削除対象が見つからなかったよ。", ephemeral=True)
+            return
+
+        if isinstance(self.view, WantDeleteSelectView):
+            self.view.selected_want_id = want_id
+
+
+class WantDeleteSelectView(discord.ui.View):
+    def __init__(self, owner_discord_user_id: str, line_user_id: str, wants: list[dict[str, Any]]) -> None:
+        super().__init__(timeout=300)
+        self.owner_discord_user_id = owner_discord_user_id
+        self.line_user_id = line_user_id
+        self.selected_want_id: int | None = None
+        self.add_item(WantDeleteSelect(owner_discord_user_id, line_user_id, wants))
+
+    @discord.ui.button(
+        label="削除",
+        style=discord.ButtonStyle.danger,
+        custom_id="discord_memo_delete_confirm",
+    )
+    async def delete_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        if str(interaction.user.id) != self.owner_discord_user_id:
+            await interaction.response.send_message("このメニューは操作できないよ。", ephemeral=True)
+            return
+
+        if self.selected_want_id is None:
+            await interaction.response.send_message("削除する項目を選んでね。", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        deleted = delete_want_for_user(self.line_user_id, self.selected_want_id)
+        if not deleted:
+            await interaction.edit_original_response(
+                content="削除対象が見つからなかったよ。",
+                view=None,
+            )
+            return
+
+        await interaction.edit_original_response(
+            content="メモを削除したよ。",
+            view=None,
+        )
+
+    @discord.ui.button(
+        label="キャンセル",
+        style=discord.ButtonStyle.secondary,
+        custom_id="discord_memo_delete_cancel",
+    )
+    async def cancel_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        if str(interaction.user.id) != self.owner_discord_user_id:
+            await interaction.response.send_message("このメニューは操作できないよ。", ephemeral=True)
+            return
+
+        await interaction.response.edit_message(
+            content="📝 メモ",
+            view=WantsMenuView(),
+        )
+
+
+class WantEditSelect(discord.ui.Select):
+    def __init__(self, owner_discord_user_id: str, line_user_id: str, wants: list[dict[str, Any]]) -> None:
+        options = [
+            discord.SelectOption(
+                label=build_want_edit_label(want),
+                value=str(want["id"]),
+            )
+            for want in wants[:25]
+        ]
+
+        super().__init__(
+            placeholder="編集するメモを選んでね",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="discord_memo_edit_select",
+        )
+        self.owner_discord_user_id = owner_discord_user_id
+        self.line_user_id = line_user_id
+        self.wants_by_id = {int(want["id"]): want for want in wants[:25]}
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if str(interaction.user.id) != self.owner_discord_user_id:
+            await interaction.response.send_message("このメニューは操作できないよ。", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            want_id = int(self.values[0])
+        except (TypeError, ValueError):
+            await interaction.followup.send("更新対象が見つからなかったよ。", ephemeral=True)
+            return
+
+        selected_want = self.wants_by_id.get(want_id)
+        if selected_want is None:
+            await interaction.followup.send("更新対象が見つからなかったよ。", ephemeral=True)
+            return
+
+        if isinstance(self.view, WantEditSelectView):
+            self.view.selected_want_id = want_id
+            self.view.selected_want_content = str(selected_want.get("content", ""))
+
+
+class WantEditSelectView(discord.ui.View):
+    def __init__(self, owner_discord_user_id: str, line_user_id: str, wants: list[dict[str, Any]]) -> None:
+        super().__init__(timeout=300)
+        self.owner_discord_user_id = owner_discord_user_id
+        self.line_user_id = line_user_id
+        self.selected_want_id: int | None = None
+        self.selected_want_content = ""
+        self.add_item(WantEditSelect(owner_discord_user_id, line_user_id, wants))
+
+    @discord.ui.button(
+        label="編集",
+        style=discord.ButtonStyle.primary,
+        custom_id="discord_memo_edit_confirm",
+    )
+    async def edit_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        if str(interaction.user.id) != self.owner_discord_user_id:
+            await interaction.response.send_message("このメニューは操作できないよ。", ephemeral=True)
+            return
+
+        if self.selected_want_id is None:
+            await interaction.response.send_message("編集する項目を選んでね。", ephemeral=True)
+            return
+
+        await interaction.response.send_modal(
+            WantEditModal(
+                self.owner_discord_user_id,
+                self.line_user_id,
+                self.selected_want_id,
+                self.selected_want_content,
+            )
+        )
+
+    @discord.ui.button(
+        label="キャンセル",
+        style=discord.ButtonStyle.secondary,
+        custom_id="discord_memo_edit_cancel",
+    )
+    async def cancel_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        if str(interaction.user.id) != self.owner_discord_user_id:
+            await interaction.response.send_message("このメニューは操作できないよ。", ephemeral=True)
+            return
+
+        await interaction.response.edit_message(
+            content="📝 メモ",
+            view=WantsMenuView(),
+        )
+
+
+class WantReminderSelect(discord.ui.Select):
+    def __init__(self, owner_discord_user_id: str, line_user_id: str, wants: list[dict[str, Any]]) -> None:
+        options = [
+            discord.SelectOption(
+                label=build_want_edit_label(want),
+                value=str(want["id"]),
+            )
+            for want in wants[:25]
+        ]
+
+        super().__init__(
+            placeholder="リマインダー化するメモを選んでね",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="discord_memo_reminder_select",
+        )
+        self.owner_discord_user_id = owner_discord_user_id
+        self.line_user_id = line_user_id
+        self.wants_by_id = {int(want["id"]): want for want in wants[:25]}
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if str(interaction.user.id) != self.owner_discord_user_id:
+            await interaction.response.send_message("このメニューは操作できないよ。", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            want_id = int(self.values[0])
+        except (TypeError, ValueError):
+            await interaction.followup.send("対象のメモが見つからなかったよ。", ephemeral=True)
+            return
+
+        selected_want = self.wants_by_id.get(want_id)
+        if selected_want is None:
+            await interaction.followup.send("対象のメモが見つからなかったよ。", ephemeral=True)
+            return
+
+        if isinstance(self.view, WantReminderSelectView):
+            self.view.selected_want_id = want_id
+            self.view.selected_want_content = str(selected_want.get("content", ""))
+
+
+class WantReminderSelectView(discord.ui.View):
+    def __init__(self, owner_discord_user_id: str, line_user_id: str, wants: list[dict[str, Any]]) -> None:
+        super().__init__(timeout=300)
+        self.owner_discord_user_id = owner_discord_user_id
+        self.line_user_id = line_user_id
+        self.selected_want_id: int | None = None
+        self.selected_want_content = ""
+        self.add_item(WantReminderSelect(owner_discord_user_id, line_user_id, wants))
+
+    @discord.ui.button(
+        label="リマインダー化",
+        style=discord.ButtonStyle.primary,
+        custom_id="discord_memo_reminder_confirm",
+    )
+    async def remind_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        if str(interaction.user.id) != self.owner_discord_user_id:
+            await interaction.response.send_message("このメニューは操作できないよ。", ephemeral=True)
+            return
+
+        if self.selected_want_id is None:
+            await interaction.response.send_message("リマインダー化する項目を選んでね。", ephemeral=True)
+            return
+
+        await interaction.response.send_modal(
+            WantReminderDatetimeModal(
+                self.owner_discord_user_id,
+                self.line_user_id,
+                self.selected_want_content,
+            )
+        )
+
+    @discord.ui.button(
+        label="キャンセル",
+        style=discord.ButtonStyle.secondary,
+        custom_id="discord_memo_reminder_cancel",
+    )
+    async def cancel_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        if str(interaction.user.id) != self.owner_discord_user_id:
+            await interaction.response.send_message("このメニューは操作できないよ。", ephemeral=True)
+            return
+
+        await interaction.response.edit_message(
+            content="📝 メモ",
+            view=WantsMenuView(),
+        )
+
 
 class WantsMenuView(discord.ui.View):
     def __init__(self) -> None:
@@ -890,20 +1406,6 @@ class WantsMenuView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
-        link = get_account_link_by_discord_user_id(str(interaction.user.id))
-        if not link:
-            if interaction.response.is_done():
-                await interaction.followup.send(
-                    "LINEアカウントと連携されていません。\nLINEで『Discord連携』を実行してね。",
-                    ephemeral=True,
-                )
-            else:
-                await interaction.response.send_message(
-                    "LINEアカウントと連携されていません。\nLINEで『Discord連携』を実行してね。",
-                    ephemeral=True,
-                )
-            return
-
         await interaction.response.send_modal(WantModal())
 
     @discord.ui.button(
@@ -935,7 +1437,7 @@ class WantsMenuView(discord.ui.View):
     @discord.ui.button(
         label="編集",
         style=discord.ButtonStyle.secondary,
-        custom_id="discord_wants_edit",
+        custom_id="discord_memo_edit_open",
         row=1,
     )
     async def edit_button(
@@ -943,15 +1445,31 @@ class WantsMenuView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
-        await interaction.response.send_message(
-            "編集機能は準備中だよ。",
+        await interaction.response.defer(ephemeral=True)
+
+        link = get_account_link_by_discord_user_id(str(interaction.user.id))
+        if not link:
+            await interaction.followup.send(
+                "LINEアカウントと連携されていません。\nLINEで『Discord連携』を実行してね。",
+                ephemeral=True,
+            )
+            return
+
+        wants = get_wants_for_user(link["line_user_id"], limit=25)
+        if not wants:
+            await interaction.followup.send("メモはありません", ephemeral=True)
+            return
+
+        await interaction.followup.send(
+            "編集するメモを選んでね。",
+            view=WantEditSelectView(str(interaction.user.id), link["line_user_id"], wants),
             ephemeral=True,
         )
 
     @discord.ui.button(
         label="削除",
         style=discord.ButtonStyle.danger,
-        custom_id="discord_wants_delete",
+        custom_id="discord_memo_delete_open",
         row=1,
     )
     async def delete_button(
@@ -959,15 +1477,31 @@ class WantsMenuView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
-        await interaction.response.send_message(
-            "削除機能は準備中だよ。",
+        await interaction.response.defer(ephemeral=True)
+
+        link = get_account_link_by_discord_user_id(str(interaction.user.id))
+        if not link:
+            await interaction.followup.send(
+                "LINEアカウントと連携されていません。\nLINEで『Discord連携』を実行してね。",
+                ephemeral=True,
+            )
+            return
+
+        wants = get_wants_for_user(link["line_user_id"], limit=25)
+        if not wants:
+            await interaction.followup.send("メモはありません", ephemeral=True)
+            return
+
+        await interaction.followup.send(
+            "削除するメモを選んでね。",
+            view=WantDeleteSelectView(str(interaction.user.id), link["line_user_id"], wants),
             ephemeral=True,
         )
 
     @discord.ui.button(
         label="リマインダー化",
         style=discord.ButtonStyle.primary,
-        custom_id="discord_wants_reminder",
+        custom_id="discord_memo_reminder_open",
         row=2,
     )
     async def reminder_button(
@@ -975,8 +1509,24 @@ class WantsMenuView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
-        await interaction.response.send_message(
-            "メモからリマインダーを作る機能は準備中だよ。",
+        await interaction.response.defer(ephemeral=True)
+
+        link = get_account_link_by_discord_user_id(str(interaction.user.id))
+        if not link:
+            await interaction.followup.send(
+                "LINEアカウントと連携されていません。\nLINEで『Discord連携』を実行してね。",
+                ephemeral=True,
+            )
+            return
+
+        wants = get_wants_for_user(link["line_user_id"], limit=25)
+        if not wants:
+            await interaction.followup.send("メモはありません", ephemeral=True)
+            return
+
+        await interaction.followup.send(
+            "リマインダー化するメモを選んでね。",
+            view=WantReminderSelectView(str(interaction.user.id), link["line_user_id"], wants),
             ephemeral=True,
         )
 
@@ -1027,7 +1577,11 @@ class BackupMenuView(discord.ui.View):
             await interaction.followup.send("保存できるデータがまだないよ。", ephemeral=True)
             return
 
-        await interaction.followup.send("バックアップを保存したよ。", ephemeral=True)
+        await interaction.followup.send(
+            "バックアップを保存したよ。",
+            ephemeral=True,
+            view=SuccessBackToMenuView(),
+        )
 
     @discord.ui.button(
         label="一覧",
@@ -1064,29 +1618,22 @@ class BackupMenuView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
+        await interaction.response.defer(ephemeral=True)
+
         link = get_account_link_by_discord_user_id(str(interaction.user.id))
         if not link:
-            if interaction.response.is_done():
-                await interaction.followup.send(
-                    "LINEアカウントと連携されていません。\nLINEで『Discord連携』を実行してね。",
-                    ephemeral=True,
-                )
-            else:
-                await interaction.response.send_message(
-                    "LINEアカウントと連携されていません。\nLINEで『Discord連携』を実行してね。",
-                    ephemeral=True,
-                )
+            await interaction.followup.send(
+                "LINEアカウントと連携されていません。\nLINEで『Discord連携』を実行してね。",
+                ephemeral=True,
+            )
             return
 
         backups = list_backups(link["line_user_id"])[:5]
         if not backups:
-            if interaction.response.is_done():
-                await interaction.followup.send("バックアップはありません", ephemeral=True)
-            else:
-                await interaction.response.send_message("バックアップはありません", ephemeral=True)
+            await interaction.followup.send("バックアップはありません", ephemeral=True)
             return
 
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "復元するバックアップを選んでね。",
             view=BackupRestoreView(str(interaction.user.id), link["line_user_id"], backups),
             ephemeral=True,
@@ -1134,14 +1681,6 @@ class MenuView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
-        link = get_account_link_by_discord_user_id(str(interaction.user.id))
-        if not link:
-            await self.send_button_message(
-                interaction,
-                "LINEアカウントと連携されていません。\nLINEで『Discord連携』を実行してね。",
-            )
-            return
-
         await interaction.response.send_modal(ReminderModal())
 
     @discord.ui.button(
@@ -1166,7 +1705,11 @@ class MenuView(discord.ui.View):
 
         reminders = get_reminders_for_user(link["line_user_id"])
         if not reminders:
-            await interaction.followup.send("リマインダーはありません", ephemeral=True)
+            await interaction.followup.send(
+                "リマインダーはありません",
+                view=ReminderListBackOnlyView(),
+                ephemeral=True,
+            )
             return
 
         lines = build_reminder_lines(link["line_user_id"])
@@ -1177,7 +1720,7 @@ class MenuView(discord.ui.View):
 
         await interaction.followup.send(
             chunks[-1],
-            view=ReminderDeleteOpenView(),
+            view=ReminderListView(),
             ephemeral=True,
         )
 
