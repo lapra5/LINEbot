@@ -229,20 +229,7 @@ def parse_datetime_input(text: str) -> dict[str, Any] | None:
 
 
 def build_reminder_lines(line_user_id: str) -> list[str]:
-    with get_conn() as conn:
-        rows = conn.execute(
-            """
-            SELECT id, content, kind, scheduled_at, weekday, time_hhmm, created_at
-            FROM reminders
-            WHERE user_id = %s
-            ORDER BY
-                CASE WHEN kind = 'single' THEN 0 ELSE 1 END,
-                CAST(scheduled_at AS timestamptz) NULLS LAST,
-                created_at ASC NULLS LAST,
-                id ASC
-            """,
-            (line_user_id,),
-        ).fetchall()
+    rows = get_reminders_for_user(line_user_id)
 
     if not rows:
         return ["リマインダーはありません"]
@@ -261,6 +248,53 @@ def build_reminder_lines(line_user_id: str) -> list[str]:
             lines.append("")
 
     return lines
+
+
+def get_reminders_for_user(line_user_id: str, limit: int | None = None) -> list[dict[str, Any]]:
+    query = """
+        SELECT id, content, kind, scheduled_at, weekday, time_hhmm, created_at
+        FROM reminders
+        WHERE user_id = %s
+        ORDER BY
+            CASE WHEN kind = 'single' THEN 0 ELSE 1 END,
+            CAST(scheduled_at AS timestamptz) NULLS LAST,
+            created_at ASC NULLS LAST,
+            id ASC
+    """
+    params: list[Any] = [line_user_id]
+    if limit is not None:
+        query += "\nLIMIT %s"
+        params.append(limit)
+
+    with get_conn() as conn:
+        rows = conn.execute(query, tuple(params)).fetchall()
+
+    return [dict(row) for row in rows]
+
+
+def build_reminder_delete_label(reminder: dict[str, Any]) -> str:
+    if reminder["kind"] == "single":
+        when_text = format_single_datetime(reminder["scheduled_at"])
+    else:
+        weekday = reminder.get("weekday")
+        weekday_text = JP_WEEK_FULL[weekday] if isinstance(weekday, int) and 0 <= weekday < len(JP_WEEK_FULL) else "曜日未設定"
+        when_text = f"毎週 {weekday_text} {reminder.get('time_hhmm') or '時刻未設定'}"
+
+    content = str(reminder.get("content", "")).strip()
+    return f"{when_text} {content}".strip()[:100]
+
+
+def delete_reminder_for_user(line_user_id: str, reminder_id: int) -> bool:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "DELETE FROM reminders WHERE id = %s AND user_id = %s",
+            (reminder_id, line_user_id),
+        )
+        return cur.rowcount > 0
+
+
+def build_reminder_list_chunks(line_user_id: str) -> list[str]:
+    return split_message_lines(build_reminder_lines(line_user_id))
 
 
 def split_message_lines(lines: list[str], max_length: int = 1900) -> list[str]:
@@ -715,6 +749,132 @@ class BackupRestoreView(discord.ui.View):
         self.add_item(BackupRestoreSelect(owner_discord_user_id, line_user_id, backups))
 
 
+class ReminderDeleteSelect(discord.ui.Select):
+    def __init__(self, owner_discord_user_id: str, line_user_id: str, reminders: list[dict[str, Any]]) -> None:
+        options = [
+            discord.SelectOption(
+                label=build_reminder_delete_label(reminder),
+                value=str(reminder["id"]),
+            )
+            for reminder in reminders[:25]
+        ]
+
+        super().__init__(
+            placeholder="削除するリマインダーを選んでね",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="discord_reminder_delete_select",
+        )
+        self.owner_discord_user_id = owner_discord_user_id
+        self.line_user_id = line_user_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if str(interaction.user.id) != self.owner_discord_user_id:
+            await interaction.response.send_message("このメニューは操作できないよ。", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            reminder_id = int(self.values[0])
+        except (TypeError, ValueError):
+            await interaction.followup.send("削除対象が見つからなかったよ。", ephemeral=True)
+            return
+
+        deleted = delete_reminder_for_user(self.line_user_id, reminder_id)
+        if not deleted:
+            await interaction.followup.send("削除対象が見つからなかったよ。", ephemeral=True)
+            return
+
+        await interaction.followup.send("リマインダーを削除したよ。", ephemeral=True)
+
+
+class ReminderDeleteSelectView(discord.ui.View):
+    def __init__(self, owner_discord_user_id: str, line_user_id: str, reminders: list[dict[str, Any]]) -> None:
+        super().__init__(timeout=300)
+        self.owner_discord_user_id = owner_discord_user_id
+        self.line_user_id = line_user_id
+        self.add_item(ReminderDeleteSelect(owner_discord_user_id, line_user_id, reminders))
+
+    @discord.ui.button(
+        label="キャンセル",
+        style=discord.ButtonStyle.secondary,
+        custom_id="discord_reminder_delete_cancel",
+    )
+    async def cancel_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        if str(interaction.user.id) != self.owner_discord_user_id:
+            await interaction.response.send_message("このメニューは操作できないよ。", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        link = get_account_link_by_discord_user_id(str(interaction.user.id))
+        if not link:
+            await interaction.edit_original_response(
+                content="LINEアカウントと連携されていません。\nLINEで『Discord連携』を実行してね。",
+                view=None,
+            )
+            return
+
+        reminders = get_reminders_for_user(link["line_user_id"])
+        if not reminders:
+            await interaction.edit_original_response(
+                content="リマインダーはありません",
+                view=None,
+            )
+            return
+
+        chunks = build_reminder_list_chunks(link["line_user_id"])
+        for chunk in chunks[:-1]:
+            await interaction.followup.send(chunk, ephemeral=True)
+
+        await interaction.edit_original_response(
+            content=chunks[-1],
+            view=ReminderDeleteOpenView(),
+        )
+
+
+class ReminderDeleteOpenView(discord.ui.View):
+    def __init__(self) -> None:
+        super().__init__(timeout=300)
+
+    @discord.ui.button(
+        label="削除",
+        style=discord.ButtonStyle.danger,
+        custom_id="discord_reminder_delete_open",
+    )
+    async def open_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.defer(ephemeral=True)
+
+        link = get_account_link_by_discord_user_id(str(interaction.user.id))
+        if not link:
+            await interaction.followup.send(
+                "LINEアカウントと連携されていません。\nLINEで『Discord連携』を実行してね。",
+                ephemeral=True,
+            )
+            return
+
+        reminders = get_reminders_for_user(link["line_user_id"], limit=25)
+        if not reminders:
+            await interaction.followup.send("リマインダーはありません", ephemeral=True)
+            return
+
+        await interaction.followup.send(
+            "削除するリマインダーを選んでね。",
+            view=ReminderDeleteSelectView(str(interaction.user.id), link["line_user_id"], reminders),
+            ephemeral=True,
+        )
+
+
 class WantsMenuView(discord.ui.View):
     def __init__(self) -> None:
         super().__init__(timeout=None)
@@ -953,11 +1113,22 @@ class MenuView(discord.ui.View):
             )
             return
 
+        reminders = get_reminders_for_user(link["line_user_id"])
+        if not reminders:
+            await interaction.followup.send("リマインダーはありません", ephemeral=True)
+            return
+
         lines = build_reminder_lines(link["line_user_id"])
         chunks = split_message_lines(lines)
 
-        for chunk in chunks:
+        for chunk in chunks[:-1]:
             await interaction.followup.send(chunk, ephemeral=True)
+
+        await interaction.followup.send(
+            chunks[-1],
+            view=ReminderDeleteOpenView(),
+            ephemeral=True,
+        )
 
     @discord.ui.button(
         label="ほしいもの",
